@@ -50,7 +50,6 @@ export default function ProductToolbar({
         </div>
 
         <div className="flex flex-wrap gap-3">
-
           <button className="inline-flex items-center gap-2 rounded-2xl border px-4 py-3 hover:bg-slate-50">
             <Plus size={18} />
             Add Product

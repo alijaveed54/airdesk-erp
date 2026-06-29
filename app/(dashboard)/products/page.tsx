@@ -78,6 +78,7 @@ export default function ProductsPage() {
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
+  const [stockFilter, setStockFilter] = useState("all");
   const [offset, setOffset] = useState("");
   const [nextOffset, setNextOffset] = useState("");
   const [history, setHistory] = useState<string[]>([]);
@@ -127,7 +128,16 @@ export default function ProductsPage() {
     loadProducts("", value);
   }
 
-  const products = useMemo(() => records.map(mapProduct), [records]);
+  const products = useMemo(() => {
+    let items = records.map(mapProduct);
+    if (stockFilter === "in") items = items.filter(p => Number(p.stock) > 0);
+    else if (stockFilter === "out") items = items.filter(p => Number(p.stock) <= 0 || p.stock === "-");
+    else if (stockFilter === "low") items = items.filter(p => {
+      const n = Number(p.stock);
+      return n > 0 && n < 10;
+    });
+    return items;
+  }, [records, stockFilter]);
 
   return (
     <div className="space-y-6">
@@ -155,6 +165,8 @@ export default function ProductsPage() {
             setSelectedProduct(null);
             loadProducts("", value);
           }}
+          stockFilter={stockFilter}
+          onStockFilterChange={setStockFilter}
           onRefresh={() => {
             setSearchInput("");
             setSearch("");
