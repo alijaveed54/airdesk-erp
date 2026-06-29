@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Search } from "lucide-react";
 import ProductDrawer from "@/components/products/ProductDrawer";
 import ProductPagination from "@/components/products/ProductPagination";
 import ProductTable from "@/components/products/ProductTable";
+import ProductToolbar from "@/components/products/ProductToolbar";
 
 type AirtableRecord = {
   id: string;
@@ -145,27 +145,24 @@ export default function ProductsPage() {
       </div>
 
       <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-        <form onSubmit={handleSearchSubmit} className="flex flex-col gap-3 md:flex-row">
-          <div className="relative flex-1">
-            <Search
-              className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"
-              size={18}
-            />
-            <input
-              value={searchInput}
-              onChange={(event) => setSearchInput(event.target.value)}
-              placeholder="Search SKU..."
-              className="h-12 w-full rounded-2xl border border-slate-200 bg-slate-50 pl-11 pr-4 text-sm outline-none transition focus:border-emerald-400 focus:bg-white focus:ring-4 focus:ring-emerald-50"
-            />
-          </div>
-
-          <button
-            type="submit"
-            className="h-12 rounded-2xl bg-emerald-600 px-6 text-sm font-black text-white shadow-lg shadow-emerald-100 transition hover:bg-emerald-700"
-          >
-            Search
-          </button>
-        </form>
+        <ProductToolbar
+          search={searchInput}
+          onSearchChange={setSearchInput}
+          onSearch={() => {
+            const value = searchInput.trim();
+            setSearch(value);
+            setHistory([]);
+            setSelectedProduct(null);
+            loadProducts("", value);
+          }}
+          onRefresh={() => {
+            setSearchInput("");
+            setSearch("");
+            setHistory([]);
+            setSelectedProduct(null);
+            loadProducts("");
+          }}
+        />
 
         {error && (
           <div className="mt-4 rounded-2xl bg-red-50 p-4 text-sm font-semibold text-red-700">
