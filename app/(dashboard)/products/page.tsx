@@ -1,13 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import {
-  ChevronLeft,
-  ChevronRight,
-  ImageIcon,
-  Loader2,
-  Search,
-} from "lucide-react";
+import { Search } from "lucide-react";
+import ProductDrawer from "@/components/products/ProductDrawer";
+import ProductPagination from "@/components/products/ProductPagination";
+import ProductTable from "@/components/products/ProductTable";
 
 type AirtableRecord = {
   id: string;
@@ -19,6 +16,16 @@ type ProductsApiResponse = {
   records?: AirtableRecord[];
   offset?: string;
   message?: string;
+};
+
+type Product = {
+  id: string;
+  image: string;
+  sku: string;
+  supplier: string;
+  price: string | number;
+  stock: string | number;
+  created: string;
 };
 
 function getFirst(value: any) {
@@ -34,7 +41,7 @@ function getNumber(value: any) {
 
 function getImageUrl(value: any) {
   const image = Array.isArray(value) ? value[0] : value;
-  return image?.thumbnails?.small?.url || image?.thumbnails?.large?.url || image?.url || "";
+  return image?.url || image?.thumbnails?.full?.url || image?.thumbnails?.large?.url || image?.thumbnails?.small?.url || "";
 }
 
 function formatPrice(value: any) {
@@ -43,8 +50,32 @@ function formatPrice(value: any) {
   return String(price);
 }
 
+function mapProduct(record: AirtableRecord): Product {
+  const fields = record.fields;
+
+  return {
+    id: record.id,
+    image: getImageUrl(fields.Image),
+    sku: fields.SKU || "-",
+    supplier:
+      fields["ALV Supplier Code"] ||
+      fields["Supplier Code"] ||
+      fields.Supplier ||
+      "-",
+    price: formatPrice(fields.Price || fields.CP || fields["Sale Price"]),
+    stock:
+      fields["Balance Stock"] ??
+      fields.Stock ??
+      fields.stock ??
+      fields.Status ??
+      "-",
+    created: fields.Created || fields.created || fields["Created time"] || "-",
+  };
+}
+
 export default function ProductsPage() {
   const [records, setRecords] = useState<AirtableRecord[]>([]);
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [offset, setOffset] = useState("");
@@ -92,35 +123,11 @@ export default function ProductsPage() {
     const value = searchInput.trim();
     setSearch(value);
     setHistory([]);
+    setSelectedProduct(null);
     loadProducts("", value);
   }
 
-  const rows = useMemo(() => {
-    return records.map((record) => {
-      const fields = record.fields;
-
-      return {
-        id: record.id,
-
-        // Products table fields
-        image: getImageUrl(fields.Image),
-        sku: fields.SKU || "-",
-        supplier:
-          fields["ALV Supplier Code"] ||
-          fields["Supplier Code"] ||
-          fields.Supplier ||
-          "-",
-        price: formatPrice(fields.Price || fields.CP || fields["Sale Price"]),
-        stock:
-          fields["Balance Stock"] ??
-          fields["Stock"] ??
-          fields.stock ??
-          fields.Status ??
-          "-",
-        created: fields.Created || fields.created || fields["Created time"] || "-",
-      };
-    });
-  }, [records]);
+  const products = useMemo(() => records.map(mapProduct), [records]);
 
   return (
     <div className="space-y-6">
@@ -166,111 +173,37 @@ export default function ProductsPage() {
           </div>
         )}
 
-        <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200">
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[860px] text-left text-sm">
-              <thead className="bg-slate-100 text-xs uppercase tracking-wide text-slate-500">
-                <tr>
-                  <th className="px-4 py-4">Image</th>
-                  <th className="px-4 py-4">SKU</th>
-                  <th className="px-4 py-4">Supplier Code</th>
-                  <th className="px-4 py-4">Price</th>
-                  <th className="px-4 py-4">Stock</th>
-                  <th className="px-4 py-4">Created</th>
-                </tr>
-              </thead>
-
-              <tbody className="divide-y divide-slate-100 bg-white">
-                {loading ? (
-                  <tr>
-                    <td colSpan={6} className="px-4 py-12 text-center">
-                      <div className="flex items-center justify-center gap-2 font-bold text-slate-500">
-                        <Loader2 className="animate-spin" size={18} />
-                        Loading Airtable products...
-                      </div>
-                    </td>
-                  </tr>
-                ) : rows.length ? (
-                  rows.map((product) => (
-                    <tr key={product.id} className="transition hover:bg-emerald-50/40">
-                      <td className="px-4 py-3">
-                        {product.image ? (
-                          <img
-                            src={product.image}
-                            alt={String(product.sku)}
-                            className="h-14 w-12 rounded-xl object-cover ring-1 ring-slate-200"
-                          />
-                        ) : (
-                          <div className="grid h-14 w-12 place-items-center rounded-xl bg-slate-100 text-slate-400">
-                            <ImageIcon size={18} />
-                          </div>
-                        )}
-                      </td>
-
-                      <td className="px-4 py-4 font-bold text-slate-900">
-                        {product.sku}
-                      </td>
-
-                      <td className="px-4 py-4">
-                        <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-bold text-blue-700">
-                          {product.supplier}
-                        </span>
-                      </td>
-
-                      <td className="px-4 py-4 font-bold text-emerald-700">
-                        {product.price === "-" ? "-" : `AED ${product.price}`}
-                      </td>
-
-                      <td className="px-4 py-4">
-                        <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700">
-                          {String(product.stock)}
-                        </span>
-                      </td>
-
-                      <td className="px-4 py-4 text-slate-600">
-                        {String(product.created)}
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={6} className="px-4 py-12 text-center font-semibold text-slate-500">
-                      No products found.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+        <div className="mt-4">
+          <ProductTable
+            products={products}
+            loading={loading}
+            onSelect={setSelectedProduct}
+          />
         </div>
 
-        <div className="mt-4 flex items-center justify-between gap-3">
-          <button
-            disabled={!history.length || loading}
-            onClick={() => {
-              const previous = history[history.length - 1] || "";
-              setHistory((items) => items.slice(0, -1));
-              loadProducts(previous);
-            }}
-            className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <ChevronLeft size={18} />
-            Previous
-          </button>
-
-          <button
-            disabled={!nextOffset || loading}
-            onClick={() => {
-              setHistory((items) => [...items, offset]);
-              loadProducts(nextOffset);
-            }}
-            className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-bold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            Next
-            <ChevronRight size={18} />
-          </button>
-        </div>
+        <ProductPagination
+          loading={loading}
+          hasPrevious={history.length > 0}
+          hasNext={Boolean(nextOffset)}
+          onPrevious={() => {
+            const previous = history[history.length - 1] || "";
+            setHistory((items) => items.slice(0, -1));
+            setSelectedProduct(null);
+            loadProducts(previous);
+          }}
+          onNext={() => {
+            setHistory((items) => [...items, offset]);
+            setSelectedProduct(null);
+            loadProducts(nextOffset);
+          }}
+        />
       </div>
+
+      <ProductDrawer
+        open={Boolean(selectedProduct)}
+        product={selectedProduct}
+        onClose={() => setSelectedProduct(null)}
+      />
     </div>
   );
 }
