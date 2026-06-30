@@ -63,3 +63,22 @@ export async function getProducts({
 
   return airtableRequest("Products", params);
 }
+export async function getCustomerByContact(contactNo: string) {
+  const safeContact = contactNo.trim().replaceAll('"', '\\"');
+
+  return airtableRequest("Customers", {
+    pageSize: "5",
+    filterByFormula: `FIND("${safeContact}", {Contact No.} & "")`,
+  });
+}
+export async function searchCustomers(query: string) {
+  const safeQuery = query.trim().replaceAll('"', '\\"');
+
+  return airtableRequest("Customers", {
+    pageSize: "10",
+    filterByFormula: `OR(
+      FIND(LOWER("${safeQuery}"), LOWER({Contact No.} & "")),
+      FIND(LOWER("${safeQuery}"), LOWER({Customer Name} & ""))
+    )`,
+  });
+}
