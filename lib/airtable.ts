@@ -245,6 +245,91 @@ function firstMatchingField(
   return "";
 }
 
+
+export type InvoiceFieldMap = {
+  number: string;
+  status: string;
+  courier?: string;
+  dispatchDate?: string;
+};
+
+const invoiceFieldCache = new Map<string, InvoiceFieldMap>();
+
+export async function getInvoiceFieldMap(
+  baseId: string,
+  token: string,
+  tableName: string
+): Promise<InvoiceFieldMap> {
+  const cacheKey = `${baseId}:${tableName}`;
+  const cached = invoiceFieldCache.get(cacheKey);
+  if (cached) return cached;
+
+  const response = await fetch(
+    `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(baseId)}/tables`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store",
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      data?.error?.message || "Unable to load Airtable invoice schema"
+    );
+  }
+
+  const table = (data.tables || []).find(
+    (item: any) => item.name === tableName
+  );
+
+  if (!table) {
+    throw new Error(`Invoice table not found: ${tableName}`);
+  }
+
+  const fields = table.fields || [];
+
+  const map: InvoiceFieldMap = {
+    number: firstMatchingField(fields, [
+      "Order No.",
+      "Order No",
+      "Order Number",
+      "Invoice No.",
+      "Invoice No",
+      "Invoice Number",
+      "Order ID",
+    ]),
+    status: firstMatchingField(fields, [
+      "Order Status",
+      "Status",
+      "order_status",
+    ]),
+    courier: firstMatchingField(fields, [
+      "Courier",
+      "Driver",
+      "Courier Name",
+      "Driver Name",
+      "Delivery Partner",
+    ]),
+    dispatchDate: firstMatchingField(fields, [
+      "Despatch Date",
+      "Dispatch Date",
+      "Dispatched Date",
+      "Date Dispatched",
+    ]),
+  };
+
+  if (!map.status) {
+    throw new Error(
+      `Invoice status field not found in table: ${tableName}`
+    );
+  }
+
+  invoiceFieldCache.set(cacheKey, map);
+  return map;
+}
+
 async function getCustomerFieldMap(
   baseId: string,
   token: string,
