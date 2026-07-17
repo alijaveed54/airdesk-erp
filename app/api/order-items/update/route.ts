@@ -1,0 +1,465 @@
+import { NextRequest, NextResponse } from "next/server";
+import {
+  airtableHeaders,
+  airtableUrl,
+  getCurrentAirtableBase,
+} from "@/lib/airtable";
+
+type AirtableSchemaField = {
+  id: string;
+  name: string;
+  type: string;
+};
+
+type AirtableSchemaTable = {
+  id: string;
+  name: string;
+  fields: AirtableSchemaField[];
+};
+
+const READ_ONLY_FIELD_TYPES = new Set([
+  "formula",
+  "rollup",
+  "multipleLookupValues",
+  "count",
+  "createdTime",
+  "lastModifiedTime",
+  "createdBy",
+  "lastModifiedBy",
+  "autoNumber",
+  "button",
+]);
+
+function findWritableField(
+  fields: AirtableSchemaField[],
+  candidates: string[]
+): AirtableSchemaField | undefined {
+  const normalized = new Map(
+    fields.map((field) => [field.name.trim().toLowerCase(), field])
+  );
+
+  for (const candidate of candidates) {
+    const field = normalized.get(candidate.trim().toLowerCase());
+
+    if (field && !READ_ONLY_FIELD_TYPES.has(field.type)) {
+      return field;
+    }
+  }
+
+  return undefined;
+}
+
+function valueForField(
+  field: AirtableSchemaField,
+  value: unknown
+): unknown {
+  if (
+    field.type === "number" ||
+    field.type === "currency" ||
+    field.type === "percent" ||
+    field.type === "duration" ||
+    field.type === "rating"
+  ) {
+    return Number(value || 0);
+  }
+
+  if (field.type === "checkbox") {
+    return Boolean(value);
+  }
+
+  const text = String(value ?? "").trim();
+
+  if (
+    field.type === "singleSelect" ||
+    field.type === "multipleSelects"
+  ) {
+    return text || null;
+  }
+
+  return text;
+}
+
+async function loadOrderEntrySchema({
+  baseId,
+  token,
+  tableName,
+}: {
+  baseId: string;
+  token: string;
+  tableName: string;
+}) {
+  const response = await fetch(
+    `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(
+      baseId
+    )}/tables`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      cache: "no-store",
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      data?.error?.message ||
+        data?.error?.error?.message ||
+        "Unable to load Airtable schema"
+    );
+  }
+
+  const table = (data.tables || []).find(
+    (item: AirtableSchemaTable) => item.name === tableName
+  ) as AirtableSchemaTable | undefined;
+
+  if (!table) {
+    throw new Error(`Order Entry table not found: ${tableName}`);
+  }
+
+  return table.fields || [];
+}
+
+function chunkRecords<T>(records: T[], size = 10): T[][] {
+  const chunks: T[][] = [];
+
+  for (let index = 0; index < records.length; index += size) {
+    chunks.push(records.slice(index, index + size));
+  }
+
+  return chunks;
+}
+
+
+async function recordExistsInTable({
+  baseId,
+  token,
+  tableName,
+  recordId,
+}: {
+  baseId: string;
+  token: string;
+  tableName: string;
+  recordId: string;
+}) {
+  const response = await fetch(
+    `${airtableUrl(baseId, tableName)}/${recordId}`,
+    {
+      headers: airtableHeaders(token),
+      cache: "no-store",
+    }
+  );
+
+  return response.ok;
+}
+
+async function resolveOrderEntryTable({
+  baseName,
+  configuredTable,
+}: {
+  baseId: string;
+  token: string;
+  baseName: string;
+  configuredTable: string;
+  recordId: string;
+}) {
+  const normalizedBaseName = String(baseName || "")
+    .trim()
+    .toLowerCase();
+
+  const isI5qDqBase =
+    normalizedBaseName.includes("i5q") ||
+    normalizedBaseName.includes("dq") ||
+    normalizedBaseName.includes("04-10-2026");
+
+  return isI5qDqBase ? "DQ Order Entry" : configuredTable;
+}
+
+export async function PATCH(req: NextRequest) {
+  try {
+    const airtable = await getCurrentAirtableBase();
+
+    if (!airtable.canEdit) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "You do not have permission to update order items",
+        },
+        { status: 403 }
+      );
+    }
+
+    const body = await req.json();
+    const items = body.items || [];
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return NextResponse.json(
+        { success: false, message: "Items are required" },
+        { status: 400 }
+      );
+    }
+
+    const invalidItem = items.find(
+      (item: any) =>
+        !item?.id || !String(item.id).startsWith("rec")
+    );
+
+    if (invalidItem) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "A valid Airtable record ID is required for every item",
+        },
+        { status: 400 }
+      );
+    }
+
+    const configuredOrderEntryTable =
+      airtable.tables.orderEntry || "BS Order Entry";
+
+    const orderEntryTable = await resolveOrderEntryTable({
+      baseId: airtable.baseId,
+      token: airtable.token,
+      baseName: airtable.baseName,
+      configuredTable: configuredOrderEntryTable,
+      recordId: String(items[0].id),
+    });
+
+    const schemaFields = await loadOrderEntrySchema({
+      baseId: airtable.baseId,
+      token: airtable.token,
+      tableName: orderEntryTable,
+    });
+
+    console.log("========== ORDER ITEMS UPDATE ==========");
+    console.log("Base:", airtable.baseName);
+    console.log("Configured Table:", configuredOrderEntryTable);
+    console.log("Resolved Table:", orderEntryTable);
+    console.log("Record IDs:", items.map((item: any) => item.id));
+
+    /*
+      Schema-aware field aliases for all registered bases:
+
+      BS / FAB:
+        quantity, Supplier, received_in_wh_1, bill_no
+
+      Tatlumput Siyam:
+        Quantity
+
+      i5Q / DQ:
+        quantity, Size, single price, Pack Price
+
+      Missing/read-only fields are deliberately skipped.
+    */
+    const fieldMap = {
+      quantity: findWritableField(schemaFields, [
+        "quantity",
+        "Quantity",
+        "Qty",
+        "QTY",
+      ]),
+      supplier: findWritableField(schemaFields, [
+        "Supplier",
+        "Purchase Supplier",
+        "supplier",
+      ]),
+      receivedWh: findWritableField(schemaFields, [
+        "received_in_wh_1",
+        "Received in WH 1",
+        "Received In WH 1",
+        "Received WH 1",
+        "Warehouse Received",
+        "instock",
+      ]),
+      billNo: findWritableField(schemaFields, [
+        "bill_no",
+        "Bill No",
+        "Bill No.",
+        "Bill Number",
+      ]),
+      size: findWritableField(schemaFields, [
+        "Size",
+        "size",
+      ]),
+      singlePrice: findWritableField(schemaFields, [
+        "single price",
+        "Single Price",
+        "single_price",
+      ]),
+      packPrice: findWritableField(schemaFields, [
+        "Pack Price",
+        "pack price",
+        "pack_price",
+      ]),
+      offerPrice: findWritableField(schemaFields, [
+        "Offer Price",
+        "offer price",
+      ]),
+    };
+
+    if (!fieldMap.quantity) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: `Editable quantity field not found in ${orderEntryTable}`,
+        },
+        { status: 400 }
+      );
+    }
+
+    const records = items.map((item: any) => {
+      const fields: Record<string, unknown> = {
+        [fieldMap.quantity!.name]: valueForField(
+          fieldMap.quantity!,
+          item.quantity
+        ),
+      };
+
+      if (fieldMap.supplier && item.supplier !== undefined) {
+        fields[fieldMap.supplier.name] = valueForField(
+          fieldMap.supplier,
+          item.supplier
+        );
+      }
+
+      if (fieldMap.receivedWh && item.receivedWh !== undefined) {
+        fields[fieldMap.receivedWh.name] = valueForField(
+          fieldMap.receivedWh,
+          item.receivedWh
+        );
+      }
+
+      if (fieldMap.billNo && item.billNo !== undefined) {
+        fields[fieldMap.billNo.name] = valueForField(
+          fieldMap.billNo,
+          item.billNo
+        );
+      }
+
+      if (fieldMap.size && item.size !== undefined) {
+        fields[fieldMap.size.name] = valueForField(
+          fieldMap.size,
+          item.size
+        );
+      }
+
+      if (fieldMap.singlePrice) {
+        const singlePriceValue =
+          item.singlePrice ?? item.price;
+
+        if (singlePriceValue !== undefined) {
+          fields[fieldMap.singlePrice.name] = valueForField(
+            fieldMap.singlePrice,
+            singlePriceValue
+          );
+        }
+      }
+
+      if (fieldMap.packPrice && item.packPrice !== undefined) {
+        fields[fieldMap.packPrice.name] = valueForField(
+          fieldMap.packPrice,
+          item.packPrice
+        );
+      }
+
+      if (fieldMap.offerPrice) {
+        const offerPriceValue =
+          item.offerPrice ?? item.price;
+
+        if (offerPriceValue !== undefined) {
+          fields[fieldMap.offerPrice.name] = valueForField(
+            fieldMap.offerPrice,
+            offerPriceValue
+          );
+        }
+      }
+
+      return {
+        id: item.id,
+        fields,
+      };
+    });
+
+    const updatedRecords: any[] = [];
+
+    // Airtable allows a maximum of 10 records per batch request.
+    for (const recordBatch of chunkRecords(records, 10)) {
+      const response = await fetch(
+        airtableUrl(
+          airtable.baseId,
+          orderEntryTable
+        ),
+        {
+          method: "PATCH",
+          headers: airtableHeaders(airtable.token),
+          cache: "no-store",
+          body: JSON.stringify({
+            records: recordBatch,
+            typecast: false,
+          }),
+        }
+      );
+
+      const responseText = await response.text();
+
+      let data: any = null;
+
+      try {
+        data = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        data = null;
+      }
+
+      console.log("Order Items Update Response:", data);
+
+      if (!response.ok) {
+        console.log("Order Items Update Sent Records:", recordBatch);
+        console.log("Order Items Update Error:", data);
+
+        return NextResponse.json(
+          {
+            success: false,
+            message:
+              data?.error?.message ||
+              data?.error?.error?.message ||
+              "Order items update failed",
+            error: data,
+          },
+          { status: response.status }
+        );
+      }
+
+      updatedRecords.push(...(data?.records || []));
+    }
+
+    return NextResponse.json({
+      success: true,
+      tableName: orderEntryTable,
+      updatedFields: {
+        quantity: fieldMap.quantity?.name || null,
+        supplier: fieldMap.supplier?.name || null,
+        receivedWh: fieldMap.receivedWh?.name || null,
+        billNo: fieldMap.billNo?.name || null,
+        size: fieldMap.size?.name || null,
+        singlePrice: fieldMap.singlePrice?.name || null,
+        packPrice: fieldMap.packPrice?.name || null,
+        offerPrice: fieldMap.offerPrice?.name || null,
+      },
+      records: updatedRecords,
+    });
+  } catch (error) {
+    console.error("Order Items Update Failed:", error);
+
+    return NextResponse.json(
+      {
+        success: false,
+        message:
+          error instanceof Error
+            ? error.message
+            : "Unknown Error",
+      },
+      { status: 500 }
+    );
+  }
+}

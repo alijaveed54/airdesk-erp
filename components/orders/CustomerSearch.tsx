@@ -1,26 +1,182 @@
 "use client";
 
-import { AlertCircle, Loader2, Search, UserRound } from "lucide-react";
+import { AlertCircle, Loader2, Search, UserRound, Plus, X } from "lucide-react";
 import { useEffect, useState } from "react";
+import {
+  getAreasByCity,
+  getCities,
+  getCitiesByArea,
+  locationMaster,
+} from "@/data/locationMaster";
 
 type CustomerRecord = {
   id: string;
   fields: {
     "Contact No."?: string;
+    "Contact No"?: string;
+    Contact?: string;
     "Customer Name"?: string;
+    Name?: string;
     Address?: string;
     "Area Name"?: string;
+    Area?: string;
     "City Name"?: string;
+    City?: string;
   };
+  name?: string;
+  customerName?: string;
+  contact?: string;
+  contactNo?: string;
+  mobile?: string;
+  address?: string;
+  area?: string;
+  areaName?: string;
+  city?: string;
+  cityName?: string;
 };
 
-export default function CustomerSearch() {
+type CustomerSearchProps = {
+  selectedCustomer: CustomerRecord | null;
+  onCustomerChange: (customer: CustomerRecord | null) => void;
+};
+
+export default function CustomerSearch({
+  selectedCustomer,
+  onCustomerChange,
+}: CustomerSearchProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<CustomerRecord[]>([]);
-  const [customer, setCustomer] = useState<CustomerRecord | null>(null);
+ 
   const [searched, setSearched] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
+  const [selectedBaseName, setSelectedBaseName] = useState("");
+
+  const [customerName, setCustomerName] = useState("");
+  const [areaName, setAreaName] = useState("");
+  const [cityName, setCityName] = useState("");
+  const [address, setAddress] = useState("");
+  const [areaSearch, setAreaSearch] = useState("");
+  const customer = selectedCustomer;  
+
+
+  function getCustomerName(record: CustomerRecord | null): string {
+    if (!record) return "";
+
+    return (
+      record.fields["Customer Name"] ||
+      record.fields.Name ||
+      record.customerName ||
+      record.name ||
+      ""
+    );
+  }
+
+  function getCustomerContact(record: CustomerRecord | null): string {
+    if (!record) return "";
+
+    return (
+      record.fields["Contact No."] ||
+      record.fields["Contact No"] ||
+      record.fields.Contact ||
+      record.contactNo ||
+      record.contact ||
+      record.mobile ||
+      ""
+    );
+  }
+
+  function getCustomerArea(record: CustomerRecord | null): string {
+    if (!record) return "";
+
+    return (
+      record.fields["Area Name"] ||
+      record.fields.Area ||
+      record.areaName ||
+      record.area ||
+      ""
+    );
+  }
+
+  function getCustomerCity(record: CustomerRecord | null): string {
+    if (!record) return "";
+
+    return (
+      record.fields["City Name"] ||
+      record.fields.City ||
+      record.cityName ||
+      record.city ||
+      ""
+    );
+  }
+
+  function getCustomerAddress(record: CustomerRecord | null): string {
+    if (!record) return "";
+
+    return record.fields.Address || record.address || "";
+  }
+
+  const cities = getCities();
+
+  const areaOptions = (
+    cityName
+      ? getAreasByCity(cityName).map((area) => ({
+          city: cityName,
+          area,
+        }))
+      : locationMaster.map((item) => ({
+          city: item.city,
+          area: item.area,
+        }))
+  )
+    .filter((item) =>
+      item.area.toLowerCase().includes(areaSearch.toLowerCase().trim())
+    )
+    .slice(0, 30);
+
+  const filteredCities =
+    areaName && !cityName ? getCitiesByArea(areaName) : cities;
+
+  const isDohaBase =
+    selectedBaseName.toLowerCase().includes("doha") ||
+    selectedBaseName.toLowerCase().includes("qatar") ||
+    selectedBaseName.toLowerCase().includes("fab") ||
+    selectedBaseName.toLowerCase().includes("i5q") ||
+    selectedBaseName.toLowerCase().includes("dq");
+
+  useEffect(() => {
+    async function loadSelectedBase() {
+      try {
+        const res = await fetch("/api/auth/me", {
+          cache: "no-store",
+        });
+
+        const data = await res.json();
+
+        if (res.ok && data.success) {
+          const baseName =
+            data.user?.selectedBase?.baseName ||
+            data.user?.permissions?.[0]?.baseName ||
+            "";
+
+          setSelectedBaseName(String(baseName));
+        }
+      } catch {
+        setSelectedBaseName("");
+      }
+    }
+
+    loadSelectedBase();
+  }, []);
+
+  useEffect(() => {
+    if (isDohaBase) {
+      setCityName("");
+      setAreaName("");
+      setAreaSearch("");
+    }
+  }, [isDohaBase]);
 
   useEffect(() => {
     const value = query.trim();
@@ -28,7 +184,7 @@ export default function CustomerSearch() {
     setError("");
     setSearched(false);
 
-    if (value.length < 3) {
+    if (value.length < 3 || customer) {
       setResults([]);
       return;
     }
@@ -37,9 +193,7 @@ export default function CustomerSearch() {
       setLoading(true);
 
       try {
-        const res = await fetch(
-          `/api/customers/Search?q=${encodeURIComponent(value)}`
-        );
+        const res = await fetch(`/api/customers?q=${encodeURIComponent(value)}`);
         const data = await res.json();
 
         if (!res.ok || !data.success) {
@@ -57,13 +211,63 @@ export default function CustomerSearch() {
     }, 500);
 
     return () => clearTimeout(timer);
-  }, [query]);
+  }, [query, customer]);
 
   function selectCustomer(record: CustomerRecord) {
-    setCustomer(record);
-    setQuery(record.fields["Contact No."] || "");
+    onCustomerChange(record);
+    setQuery(getCustomerContact(record));
     setResults([]);
     setSearched(true);
+  }
+
+  function clearSelectedCustomer() {
+    onCustomerChange(null);
+    setQuery("");
+    setResults([]);
+    setSearched(false);
+    setError("");
+  }
+
+  async function createNewCustomer() {
+    setError("");
+
+    if (!query.trim() || !customerName.trim()) {
+      setError("Contact No. and Customer Name are required.");
+      return;
+    }
+
+    setCreating(true);
+
+    try {
+      const res = await fetch("/api/customers", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          contactNo: query.trim(),
+          customerName: customerName.trim(),
+          address: address.trim(),
+          ...(!isDohaBase && {
+            areaName: areaName.trim(),
+            cityName: cityName.trim(),
+          }),
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        throw new Error(data.message || "Customer create failed");
+      }
+
+      const createdRecord = data.record as CustomerRecord;
+      selectCustomer(createdRecord);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Customer create failed");
+    } finally {
+      setCreating(false);
+    }
   }
 
   return (
@@ -89,7 +293,7 @@ export default function CustomerSearch() {
             value={query}
             onChange={(event) => {
               setQuery(event.target.value);
-              setCustomer(null);
+              onCustomerChange(null);
             }}
             placeholder="Search by mobile number or name"
             className="h-12 w-full rounded-2xl border border-slate-200 bg-slate-50 pl-11 pr-12 outline-none transition focus:border-emerald-500 focus:bg-white"
@@ -113,14 +317,13 @@ export default function CustomerSearch() {
                 className="w-full rounded-xl p-3 text-left transition hover:bg-emerald-50"
               >
                 <p className="font-black text-slate-900">
-                  {record.fields["Customer Name"] || "Unnamed Customer"}
+                  {getCustomerName(record) || "Unnamed Customer"}
                 </p>
                 <p className="mt-1 text-sm text-slate-600">
-                  📞 {record.fields["Contact No."] || "-"}
+                  📞 {getCustomerContact(record) || "-"}
                 </p>
                 <p className="mt-1 text-xs text-slate-500">
-                  {record.fields["Area Name"] || "-"},{" "}
-                  {record.fields["City Name"] || "-"}
+                  {getCustomerArea(record) || "-"}, {getCustomerCity(record) || "-"}
                 </p>
               </button>
             ))}
@@ -137,29 +340,42 @@ export default function CustomerSearch() {
 
       {customer && (
         <div className="mt-5 rounded-3xl border border-emerald-200 bg-emerald-50 p-5">
-          <div className="flex items-start gap-3">
-            <div className="grid h-12 w-12 place-items-center rounded-2xl bg-white text-emerald-700">
-              <UserRound size={22} />
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="grid h-12 w-12 place-items-center rounded-2xl bg-white text-emerald-700">
+                <UserRound size={22} />
+              </div>
+
+              <div>
+                <p className="text-xs font-black uppercase tracking-wide text-emerald-700">
+                  Selected Customer
+                </p>
+              <p className="mt-1 text-lg font-black text-slate-950">
+                {getCustomerName(customer) || "-"}
+              </p>
+              <p className="mt-1 text-sm text-slate-600">
+                📞 {getCustomerContact(customer) || "-"}
+              </p>
+              {!isDohaBase && (
+                <p className="mt-1 text-sm text-slate-600">
+                  📍 {getCustomerArea(customer) || "-"}, {getCustomerCity(customer) || "-"}
+                </p>
+              )}
+                <p className="mt-1 text-sm text-slate-600">
+                  {getCustomerAddress(customer) || "-"}
+                </p>
+              </div>
             </div>
 
-            <div>
-              <p className="text-xs font-black uppercase tracking-wide text-emerald-700">
-                Selected Customer
-              </p>
-              <p className="mt-1 text-lg font-black text-slate-950">
-                {customer.fields["Customer Name"] || "-"}
-              </p>
-              <p className="mt-1 text-sm text-slate-600">
-                📞 {customer.fields["Contact No."] || "-"}
-              </p>
-              <p className="mt-1 text-sm text-slate-600">
-                📍 {customer.fields["Area Name"] || "-"},{" "}
-                {customer.fields["City Name"] || "-"}
-              </p>
-              <p className="mt-1 text-sm text-slate-600">
-                {customer.fields.Address || "-"}
-              </p>
-            </div>
+            <button
+              type="button"
+              onClick={clearSelectedCustomer}
+              className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-red-200 bg-white px-3 py-2 text-sm font-black text-red-600 transition hover:bg-red-50"
+              title="Remove selected customer"
+            >
+              <X size={16} />
+              Change
+            </button>
           </div>
         </div>
       )}
@@ -176,10 +392,116 @@ export default function CustomerSearch() {
       {!customer && (
         <div className="mt-5 grid gap-4 md:grid-cols-2">
           <Input label="Contact No." value={query} readOnly />
-          <Input label="Customer Name" placeholder="Customer name" />
-          <Input label="Area Name" placeholder="Area name" />
-          <Input label="City Name" placeholder="City name" />
-          <Input label="Address" placeholder="Full address" />
+          <Input label="Customer Name" value={customerName} onChange={(e) => setCustomerName(e.target.value)} />
+          {!isDohaBase && (
+            <>
+          <label className="block">
+            <span className="mb-2 block text-sm font-bold text-slate-700">
+              City
+            </span>
+
+            <select
+              value={cityName}
+              onChange={(e) => {
+                const city = e.target.value;
+                setCityName(city);
+
+                if (areaName && city) {
+                  const validAreas = getAreasByCity(city);
+                  if (!validAreas.includes(areaName)) {
+                    setAreaName("");
+                    setAreaSearch("");
+                  }
+                }
+              }}
+              className="h-12 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 outline-none transition focus:border-emerald-500 focus:bg-white"
+            >
+              <option value="">Select City</option>
+
+              {filteredCities.map((city) => (
+                <option key={city} value={city}>
+                  {city}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="relative block">
+            <span className="mb-2 block text-sm font-bold text-slate-700">
+              Area
+            </span>
+
+            <div className="relative">
+              <Search
+                size={18}
+                className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"
+              />
+
+              <input
+                value={areaSearch}
+                onChange={(e) => {
+                  setAreaSearch(e.target.value);
+                  setAreaName("");
+                }}
+                placeholder={
+                  cityName
+                    ? `Search area in ${cityName}`
+                    : "Search area first or select city"
+                }
+                className="h-12 w-full rounded-2xl border border-slate-200 bg-slate-50 pl-11 pr-4 outline-none transition focus:border-emerald-500 focus:bg-white"
+              />
+            </div>
+
+            {areaSearch.trim().length > 0 && !areaName && areaOptions.length > 0 && (
+              <div className="absolute z-40 mt-2 max-h-72 w-full overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">
+                {areaOptions.map((item) => (
+                  <button
+                    key={`${item.city}-${item.area}`}
+                    type="button"
+                    onClick={() => {
+                      setAreaName(item.area);
+                      setAreaSearch(item.area);
+
+                      const matchedCities = getCitiesByArea(item.area);
+
+                      if (matchedCities.length === 1) {
+                        setCityName(matchedCities[0]);
+                      } else if (!cityName) {
+                        setCityName(item.city);
+                      }
+                    }}
+                    className="w-full rounded-xl p-3 text-left transition hover:bg-emerald-50"
+                  >
+                    <p className="font-black text-slate-900">{item.area}</p>
+                    <p className="mt-1 text-xs font-bold text-slate-500">
+                      {item.city}
+                    </p>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {areaName && (
+              <p className="mt-2 text-xs font-bold text-emerald-700">
+                Selected: {areaName}
+              </p>
+            )}
+          </label>
+
+            </>
+          )}
+
+          <Input label="Address" value={address} onChange={(e) => setAddress(e.target.value)} />
+
+          <button
+            type="button"
+            onClick={createNewCustomer}
+            disabled={creating}
+            className="mt-7 inline-flex h-12 items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-emerald-600 to-blue-600 px-6 text-sm font-black text-white shadow-lg disabled:opacity-50"
+          >
+            {creating ? <Loader2 size={18} className="animate-spin" /> : <Plus size={18} />}
+            {creating ? "Creating..." : "Create Customer"}
+          </button>
         </div>
       )}
     </div>
@@ -194,12 +516,10 @@ function Input({
 } & React.InputHTMLAttributes<HTMLInputElement>) {
   return (
     <label className="block">
-      <span className="mb-2 block text-sm font-bold text-slate-700">
-        {label}
-      </span>
+      <span className="mb-2 block text-sm font-bold text-slate-700">{label}</span>
       <input
         {...props}
-        className="h-12 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 outline-none transition focus:border-emerald-500 focus:bg-white disabled:bg-slate-100"
+        className="h-12 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 outline-none transition focus:border-emerald-500 focus:bg-white"
       />
     </label>
   );
