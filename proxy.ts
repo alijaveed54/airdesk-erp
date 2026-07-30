@@ -24,7 +24,10 @@ export function proxy(request: NextRequest) {
     pathname.startsWith("/favicon") ||
     pathname.startsWith("/api/auth") ||
     pathname.startsWith("/login") ||
-    pathname.startsWith("/base/select")
+    pathname.startsWith("/base/select") ||
+    pathname.startsWith("/privacy-policy") ||
+    pathname.startsWith("/stock/doha") ||
+    pathname.startsWith("/api/public/stock/doha")
   ) {
     return NextResponse.next();
   }
@@ -48,8 +51,15 @@ export function proxy(request: NextRequest) {
   }
 
   if (session.role === "Supplier") {
-    const allowed = pathname.startsWith("/suppliers") || pathname.startsWith("/api/suppliers");
-    return allowed ? NextResponse.next() : NextResponse.redirect(new URL("/suppliers", request.url));
+    const allowed =
+      pathname.startsWith("/suppliers") ||
+      pathname.startsWith("/api/suppliers") ||
+      pathname.startsWith("/reports/supplier-activity") ||
+      pathname.startsWith("/api/reports/supplier-activity");
+
+    return allowed
+      ? NextResponse.next()
+      : NextResponse.redirect(new URL("/suppliers", request.url));
   }
 
   if (pathname.startsWith("/reports") && !hasPermission(session, "canReports")) {
@@ -80,5 +90,7 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  matcher: [
+    "/((?!_next/static|_next/image|favicon.ico|api/facebook/post/direct|api/facebook/batch/process).*)",
+  ],
 };
