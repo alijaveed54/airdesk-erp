@@ -2009,6 +2009,7 @@ async function processQueueInternal(
 export async function processBatchQueue(
   limit = 1
 ) {
+
   const safeLimit =
     Math.min(
       Math.max(
@@ -2018,25 +2019,16 @@ export async function processBatchQueue(
       3
     );
 
-  if (activeProcessor) {
-  console.log("Ignoring old processor lock");
-}
-  }
 
-  activeProcessor =
-    processQueueInternal(
+  const result =
+    await processQueueInternal(
       safeLimit
     );
 
-  try {
-    const result =
-      await activeProcessor;
 
-    return {
-      busy: false,
-      ...result,
-    };
-  } finally {
-    activeProcessor = null;
-  }
+  return {
+    busy:false,
+    ...result
+  };
+
 }
