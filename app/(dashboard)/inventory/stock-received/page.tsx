@@ -1,10 +1,11 @@
 "use client";
 
+import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import DQStockReceiveForm from "./components/DQStockReceiveForm";
 import FABStockReceiveForm from "./components/FABStockReceiveForm";
 
-export default function StockReceivedPage() {
+function StockReceivedContent() {
   const searchParams = useSearchParams();
 
   const selectedBase = String(
@@ -53,4 +54,13 @@ export default function StockReceivedPage() {
         </div>
       );
   }
+}
+
+
+export default function StockReceivedPage() {
+  return (
+    <Suspense fallback={<div className="p-6 font-bold">Loading...</div>}>
+      <StockReceivedContent />
+    </Suspense>
+  );
 }

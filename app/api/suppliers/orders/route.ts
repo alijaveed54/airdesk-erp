@@ -25,6 +25,13 @@ function escapeAirtableString(value: string) {
     .replace(/'/g, "\\'");
 }
 
+// MYS-SUPPLIER-UNKNOWN-V2: blank supplier display/filter support
+const UNKNOWN_SUPPLIER_LABEL = "Unknown Supplier";
+
+function isUnknownSupplierSelection(value: string) {
+  return value.trim().toLowerCase() === UNKNOWN_SUPPLIER_LABEL.toLowerCase();
+}
+
 function textValue(value: any) {
   if (Array.isArray(value)) {
     return value.map((item) => String(item ?? "")).join(" ").trim();
@@ -61,8 +68,27 @@ function getOrderNumber(fields: Record<string, any>) {
   );
 }
 
+
+function getCustomerCity(fields: Record<string, any>) {
+  return textValue(
+    fields["Customer City"] ||
+      fields["Billing Address City"] ||
+      fields["Shipping Address City"] ||
+      fields["City Name"] ||
+      fields.City ||
+      fields["Consignee City"] ||
+      ""
+  );
+}
+
 function normalizeRecord(record: any, baseId: string, tableName: string) {
   const fields = record.fields || {};
+  const rawSupplier = textValue(
+    fields.Supplier ||
+      fields["Purchase Supplier"] ||
+      fields["Supplier Code"] ||
+      ""
+  );
 
   return {
     ...record,
@@ -77,10 +103,7 @@ function normalizeRecord(record: any, baseId: string, tableName: string) {
         fields["Order Status"] ||
         fields.order_status ||
         "",
-      Supplier:
-        fields.Supplier ||
-        fields["Purchase Supplier"] ||
-        "",
+      Supplier: rawSupplier || UNKNOWN_SUPPLIER_LABEL,
       received_in_wh_1:
         fields.received_in_wh_1 ||
         fields["Received In WH 1"] ||
@@ -90,6 +113,7 @@ function normalizeRecord(record: any, baseId: string, tableName: string) {
         fields.SKU ||
         fields.sku ||
         "",
+      "Customer City": getCustomerCity(fields),
     },
   };
 }
@@ -101,10 +125,10 @@ function isPendingRecord(record: any, supplierCode: string) {
     fields.Supplier ||
       fields["Purchase Supplier"] ||
       fields["Supplier Code"] ||
-      ""
+      UNKNOWN_SUPPLIER_LABEL
   ).toLowerCase();
 
-  const requiredSupplier = supplierCode.toLowerCase();
+  const requiredSupplier = supplierCode.trim().toLowerCase();
   const showAllSuppliers = requiredSupplier === "all";
 
   const itemCode = textValue(fields["Item Code"]);
@@ -124,10 +148,9 @@ function isPendingRecord(record: any, supplierCode: string) {
 
   return (
     supplierMatches &&
-    supplier !== "" &&
     itemCode !== "" &&
     orderNumber !== "" &&
-    received === "" &&
+    received !== "yes" &&
     statusMatches
   );
 }
@@ -145,15 +168,24 @@ async function fetchSupplierRecords({
 }) {
   const records: any[] = [];
   let offset = "";
+  const normalizedSupplierCode = supplierCode.trim().toLowerCase();
 
   do {
     const params = new URLSearchParams();
     params.set("pageSize", "100");
-    if (supplierCode.toLowerCase() === "all") {
+
+    if (normalizedSupplierCode === "all") {
       params.set(
         "filterByFormula",
         `AND(
-          LEN(TRIM({Supplier} & '')) > 0,
+          LEN(TRIM({Item Code} & '')) > 0
+        )`
+      );
+    } else if (isUnknownSupplierSelection(supplierCode)) {
+      params.set(
+        "filterByFormula",
+        `AND(
+          LEN(TRIM({Supplier} & '')) = 0,
           LEN(TRIM({Item Code} & '')) > 0
         )`
       );

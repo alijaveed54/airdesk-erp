@@ -2,10 +2,8 @@
 
 import OrderDetailsModal from "@/components/orders/OrderDetailsModal";
 import type { OrderRecord } from "@/types/order";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-
-type UpdateField = "status" | "courier";
 
 type Filters = {
   customer: string;
@@ -15,6 +13,11 @@ type Filters = {
   courier: string;
   dateFrom: string;
   dateTo: string;
+};
+
+type InlineDraft = {
+  status: string;
+  courier: string;
 };
 
 function getCustomerName(order: OrderRecord) {
@@ -27,6 +30,59 @@ function getPhone(order: OrderRecord) {
 
 function getOrderNo(order: OrderRecord) {
   return order.fields["order_no."] ?? "-";
+}
+
+function getCourierStatus(order: OrderRecord) {
+  const fields = order.fields as Record<string, unknown>;
+  const value = fields.__courierStatus;
+  const resolved = Array.isArray(value) ? value[0] : value;
+
+  // Direct source from /api/orders/list:
+  // Airtable TFM Status -> __courierStatus -> badge.
+  // No second API call and no Order Status fallback.
+  return String(resolved ?? "").trim();
+}
+
+function getCourierStatusBadgeClass(status: string) {
+  const normalized = status.trim().toLowerCase();
+
+  if (!normalized) {
+    return "";
+  }
+
+  if (normalized.includes("delivered")) {
+    return "border-emerald-200 bg-emerald-100 text-emerald-800";
+  }
+
+  if (
+    normalized === "ofd" ||
+    normalized.includes("out for delivery") ||
+    normalized.includes("out-for-delivery")
+  ) {
+    return "border-violet-200 bg-violet-100 text-violet-800";
+  }
+
+  if (
+    normalized.includes("returned") ||
+    normalized.includes("return to origin") ||
+    normalized === "rto"
+  ) {
+    return "border-red-200 bg-red-100 text-red-800";
+  }
+
+  if (normalized.includes("cancel")) {
+    return "border-slate-300 bg-slate-200 text-slate-800";
+  }
+
+  if (
+    normalized.includes("hold") ||
+    normalized.includes("failed") ||
+    normalized.includes("exception")
+  ) {
+    return "border-amber-200 bg-amber-100 text-amber-800";
+  }
+
+  return "border-blue-200 bg-blue-100 text-blue-800";
 }
 
 function getStore(order: OrderRecord) {
@@ -43,6 +99,210 @@ function getCurrency(order: OrderRecord) {
 
 function getSource(order: OrderRecord) {
   return String(order.fields.__source || "");
+}
+
+function getRowCapability(
+  order: OrderRecord,
+  field: "__canUpdateStatus" | "__canUpdateCourier",
+  fallback: boolean
+) {
+  const value = (order.fields as Record<string, unknown>)[field];
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function getRowOptions(
+  order: OrderRecord,
+  field: "__statusOptions" | "__courierOptions",
+  fallback: string[]
+) {
+  const value = (order.fields as Record<string, unknown>)[field];
+
+  if (!Array.isArray(value)) return fallback;
+
+  const options = value
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+
+  return options.length > 0 ? options : fallback;
+}
+
+function getInStockStatus(order: OrderRecord) {
+  const value = (order.fields as Record<string, unknown>).Instock;
+  return String(Array.isArray(value) ? value[0] ?? "" : value ?? "").trim();
+}
+
+function isReadyFullInStockOrder(order: OrderRecord) {
+  const fields = order.fields as Record<string, unknown>;
+  const itemBasedRule =
+    fields.__allItemsWhYesBillBlank;
+  const orderStatus =
+    String(order.fields.order_status || "")
+      .trim()
+      .toLowerCase();
+  const isOrderReceived =
+    orderStatus === "order received";
+
+  // BS ITEM BLUE RULE V5:
+  // 1. Every BS Order Entry item has Received in WH 1 = Yes.
+  // 2. Every BS Order Entry item has a blank Bill Number.
+  // 3. The BS Invoice Order Status is exactly Order Received.
+  // BS Invoice.Instock is not required.
+  if (typeof itemBasedRule === "boolean") {
+    return (
+      itemBasedRule &&
+      isOrderReceived
+    );
+  }
+
+  // Compatibility fallback for responses from an older API build.
+  const inStockIsFull =
+    getInStockStatus(order).toLowerCase() === "full";
+
+  return (
+    inStockIsFull &&
+    isOrderReceived
+  );
+}
+
+function isPartialInStockOrder(order: OrderRecord) {
+  const inStockStatus = getInStockStatus(order).toLowerCase();
+  return inStockStatus === "partial" || inStockStatus === "partially";
+}
+
+
+function getReadyProcessStatus(
+  order: OrderRecord
+): "green" | "orange" | "" {
+  const value = (
+    order.fields as Record<
+      string,
+      unknown
+    >
+  ).__readyProcessStatus;
+
+  const normalized = String(
+    value || ""
+  )
+    .trim()
+    .toLowerCase();
+
+  if (normalized === "green") {
+    return "green";
+  }
+
+  if (normalized === "orange") {
+    return "orange";
+  }
+
+  return "";
+}
+
+function getReadyProcessCounts(
+  order: OrderRecord
+) {
+  const value = (
+    order.fields as Record<
+      string,
+      unknown
+    >
+  ).__readyProcessCounts;
+
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value)
+  ) {
+    return null;
+  }
+
+  const counts =
+    value as Record<string, unknown>;
+
+  return {
+    totalItems: Number(
+      counts.totalItems || 0
+    ),
+    inStockItems: Number(
+      counts.inStockItems || 0
+    ),
+    receivedItems: Number(
+      counts.receivedItems || 0
+    ),
+    soldOutItems: Number(
+      counts.soldOutItems || 0
+    ),
+  };
+}
+
+function getOrderProcessingPriority(
+  order: OrderRecord
+) {
+  if (
+    isReadyFullInStockOrder(order)
+  ) {
+    return 0;
+  }
+
+  const readyStatus =
+    getReadyProcessStatus(order);
+
+  if (readyStatus === "green") {
+    return 1;
+  }
+
+  if (readyStatus === "orange") {
+    return 2;
+  }
+
+  return 3;
+}
+
+function getReadyProcessTitle(
+  order: OrderRecord
+) {
+  const counts =
+    getReadyProcessCounts(order);
+
+  if (!counts) {
+    return "";
+  }
+
+  return [
+    `Total: ${counts.totalItems}`,
+    `In stock: ${counts.inStockItems}`,
+    `Received UAE: ${counts.receivedItems}`,
+    `Sold out: ${counts.soldOutItems}`,
+  ].join(" • ");
+}
+
+function isReturnOrder(order: OrderRecord) {
+  const fields = order.fields as Record<string, unknown>;
+
+  const replacementValue =
+    fields.Replacement ??
+    fields["Replacement Order"] ??
+    fields["Is Replacement"] ??
+    fields["replacement"];
+
+  if (Array.isArray(replacementValue)) {
+    return replacementValue.some((value) => {
+      const normalized = String(value).trim().toLowerCase();
+      return normalized === "true" || normalized === "yes" || normalized === "checked" || normalized === "1";
+    });
+  }
+
+  if (typeof replacementValue === "boolean") {
+    return replacementValue;
+  }
+
+  const normalized = String(replacementValue ?? "").trim().toLowerCase();
+
+  return (
+    normalized === "true" ||
+    normalized === "yes" ||
+    normalized === "checked" ||
+    normalized === "1"
+  );
 }
 
 function getOrderDate(order: OrderRecord) {
@@ -74,6 +334,11 @@ export default function OrdersListPage() {
   const [appliedFilters, setAppliedFilters] = useState<Filters>(emptyFilters);
   const [showFilters, setShowFilters] = useState(false);
   const [savingKey, setSavingKey] = useState("");
+  const [editingOrderId, setEditingOrderId] = useState("");
+  const [inlineDraft, setInlineDraft] = useState<InlineDraft>({
+    status: "",
+    courier: "",
+  });
   const [nextOffset, setNextOffset] = useState("");
   const [loadingMore, setLoadingMore] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<OrderRecord | null>(null);
@@ -81,7 +346,12 @@ export default function OrdersListPage() {
   const [bulkCourier, setBulkCourier] = useState("");
   const [bulkSaving, setBulkSaving] = useState(false);
   const [downloadingDriverSheet, setDownloadingDriverSheet] = useState(false);
+  const [downloadingCourierFiles, setDownloadingCourierFiles] = useState(false);
   const [baseName, setBaseName] = useState("");
+  const [userRole, setUserRole] = useState("");
+  const [movingOrderId, setMovingOrderId] = useState("");
+  const [movedOrderIds, setMovedOrderIds] = useState<string[]>([]);
+  const [deletingOrderId, setDeletingOrderId] = useState("");
   const [capabilities, setCapabilities] = useState({
     hasStore: true,
     hasStatus: true,
@@ -89,6 +359,25 @@ export default function OrdersListPage() {
     canUpdateStatus: true,
     canUpdateCourier: true,
   });
+
+  useEffect(() => {
+    async function loadCurrentUser() {
+      try {
+        const response = await fetch("/api/auth/me", { cache: "no-store" });
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+          setUserRole(String(data.user?.role || data.role || ""));
+        } else {
+          setUserRole("");
+        }
+      } catch {
+        setUserRole("");
+      }
+    }
+
+    loadCurrentUser();
+  }, []);
 
   useEffect(() => {
     async function loadOrders() {
@@ -137,52 +426,111 @@ export default function OrdersListPage() {
     loadOrders();
   }, [appliedSearch, appliedFilters]);
 
-  async function updateOrder(
-    orderId: string,
-    field: UpdateField,
-    value: string
-  ) {
-    const savingId = `${orderId}-${field}`;
-    setSavingKey(savingId);
+  function startInlineEdit(order: OrderRecord) {
+    setEditingOrderId(order.id);
+    setInlineDraft({
+      status: String(order.fields.order_status || ""),
+      courier: String(order.fields.Courier || ""),
+    });
+  }
 
-    const oldOrders = orders;
+  function cancelInlineEdit() {
+    if (savingKey) return;
 
-    setOrders((prev) =>
-      prev.map((order) =>
-        order.id === orderId
-          ? {
-              ...order,
-              fields: {
-                ...order.fields,
-                [field === "status" ? "order_status" : "Courier"]: value,
-              },
-            }
-          : order
-      )
+    setEditingOrderId("");
+    setInlineDraft({
+      status: "",
+      courier: "",
+    });
+  }
+
+  async function saveInlineEdit(order: OrderRecord) {
+    const currentStatus = String(order.fields.order_status || "");
+    const currentCourier = String(order.fields.Courier || "");
+
+    const rowCanUpdateStatus = getRowCapability(
+      order,
+      "__canUpdateStatus",
+      capabilities.canUpdateStatus
+    );
+    const rowCanUpdateCourier = getRowCapability(
+      order,
+      "__canUpdateCourier",
+      capabilities.canUpdateCourier
     );
 
+    const statusChanged =
+      rowCanUpdateStatus &&
+      inlineDraft.status !== currentStatus;
+
+    const courierChanged =
+      rowCanUpdateCourier &&
+      inlineDraft.courier !== currentCourier;
+
+    if (!statusChanged && !courierChanged) {
+      cancelInlineEdit();
+      return;
+    }
+
+    const tableName = String(
+      (order.fields as Record<string, unknown>).__tableName || ""
+    ).trim();
+
+    if (!tableName) {
+      alert("Source table was not found for this order.");
+      return;
+    }
+
+    const savingId = `${order.id}-inline`;
+    setSavingKey(savingId);
+
     try {
-      const res = await fetch("/api/orders/update", {
+      const response = await fetch("/api/orders/list", {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          orderId,
-          field,
-          value,
+          orderId: order.id,
+          tableName,
+          ...(statusChanged ? { status: inlineDraft.status } : {}),
+          ...(courierChanged ? { courier: inlineDraft.courier } : {}),
         }),
       });
 
-      const data = await res.json();
+      const data = await response.json().catch(() => null);
 
-      if (!res.ok || !data.success) {
-        setOrders(oldOrders);
-        alert(data.message || "Update failed");
+      if (!response.ok || !data?.success) {
+        alert(data?.message || "Inline update failed");
+        return;
       }
+
+      setOrders((previous) =>
+        previous.map((item) =>
+          item.id === order.id
+            ? {
+                ...item,
+                fields: {
+                  ...item.fields,
+                  ...(statusChanged
+                    ? { order_status: inlineDraft.status }
+                    : {}),
+                  ...(courierChanged
+                    ? { Courier: inlineDraft.courier }
+                    : {}),
+                },
+              }
+            : item
+        )
+      );
+
+      setEditingOrderId("");
+      setInlineDraft({
+        status: "",
+        courier: "",
+      });
     } catch {
-      setOrders(oldOrders);
-      alert("Update failed");
+      alert("Inline update failed");
     } finally {
       setSavingKey("");
     }
@@ -224,7 +572,14 @@ export default function OrdersListPage() {
     const data = await res.json();
 
     if (res.ok && data.success) {
-      setOrders((prev) => [...prev, ...(data.records || [])]);
+      setOrders((prev) => {
+        const merged = [...prev, ...(data.records || [])];
+        const uniqueOrders = new Map(
+          merged.map((order) => [order.id, order])
+        );
+
+        return Array.from(uniqueOrders.values());
+      });
       setNextOffset(data.nextOffset || "");
     }
 
@@ -333,6 +688,113 @@ export default function OrdersListPage() {
     setBulkSaving(false);
   }
 
+  const isFabDohaNonStock = useMemo(() => {
+    const normalized = baseName.trim().toLowerCase();
+
+    return (
+      (normalized.includes("fab") || normalized.includes("doha")) &&
+      (normalized.includes("non stock") ||
+        normalized.includes("non-stock") ||
+        normalized.includes("without stock"))
+    );
+  }, [baseName]);
+
+  const normalizedUserRole = userRole.trim().toLowerCase();
+  const isAdmin = normalizedUserRole === "admin";
+  const isSupplier = normalizedUserRole === "supplier";
+
+  async function moveOrderToFabStock(order: OrderRecord) {
+    const orderNo = getOrderNo(order);
+
+    if (!orderNo || orderNo === "-") {
+      alert("Order number not found.");
+      return;
+    }
+
+    if (
+      !confirm(
+        `Move all items of ${orderNo} to FAB Doha Stock? This action must only be done once.`
+      )
+    ) {
+      return;
+    }
+
+    setMovingOrderId(order.id);
+
+    try {
+      const response = await fetch("/api/orders/move-to-fab-stock", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orderId: order.id,
+          orderNo,
+          sourceTable: String(
+            (order.fields as Record<string, unknown>).__tableName || ""
+          ),
+        }),
+      });
+
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok || !data?.success) {
+        alert(data?.message || "Move to FAB Stock failed");
+        return;
+      }
+
+      setMovedOrderIds((previous) =>
+        previous.includes(order.id) ? previous : [...previous, order.id]
+      );
+
+      alert(
+        `${orderNo}: ${data.totalQuantity || 0} PCS added to FAB Doha Stock.`
+      );
+    } catch {
+      alert("Move to FAB Stock failed");
+    } finally {
+      setMovingOrderId("");
+    }
+  }
+
+  const isBSOrderEntry = useMemo(() => {
+    const normalizedBaseName = baseName.toLowerCase();
+
+    return (
+      normalizedBaseName.includes("bs order") ||
+      normalizedBaseName.includes("bs invoice") ||
+      normalizedBaseName.trim() === "bs"
+    );
+  }, [baseName]);
+
+  const displayedOrders = useMemo(() => {
+    if (!isBSOrderEntry) {
+      return orders;
+    }
+
+    return orders
+      .map((order, index) => ({
+        order,
+        index,
+      }))
+      .sort((first, second) => {
+        const priorityDifference =
+          getOrderProcessingPriority(
+            first.order
+          ) -
+          getOrderProcessingPriority(
+            second.order
+          );
+
+        if (
+          priorityDifference !== 0
+        ) {
+          return priorityDifference;
+        }
+
+        return first.index - second.index;
+      })
+      .map((item) => item.order);
+  }, [orders, isBSOrderEntry]);
+
   const supportsDriverSheet =
     baseName.toLowerCase().includes("fab") ||
     baseName.toLowerCase().includes("doha") ||
@@ -388,6 +850,156 @@ export default function OrdersListPage() {
     }
   }
 
+  async function downloadCourierFiles() {
+    setDownloadingCourierFiles(true);
+
+    try {
+      let downloadedFiles = 0;
+      const emptyCouriers: string[] = [];
+
+      for (const courier of ["TFM", "EWE"]) {
+        const response = await fetch(
+          `/api/orders/courier-download?courier=${courier}`,
+          { cache: "no-store" }
+        );
+
+        if (response.status === 404) {
+          emptyCouriers.push(courier);
+          continue;
+        }
+
+        if (!response.ok) {
+          const data = await response
+            .json()
+            .catch(() => null);
+
+          throw new Error(
+            data?.message ||
+              `${courier} courier download failed`
+          );
+        }
+
+        const blob = await response.blob();
+        const contentDisposition =
+          response.headers.get("Content-Disposition") ||
+          "";
+
+        const fileNameMatch = contentDisposition.match(
+          /filename="?([^"]+)"?/
+        );
+
+        const fileName =
+          fileNameMatch?.[1] ||
+          `${courier}_Courier_${new Date()
+            .toISOString()
+            .slice(0, 10)}.${
+              courier === "EWE" ? "xls" : "xlsx"
+            }`;
+
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+
+        link.href = url;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        downloadedFiles += 1;
+
+        await new Promise((resolve) =>
+          setTimeout(resolve, 500)
+        );
+      }
+
+      if (downloadedFiles === 0) {
+        alert(
+          "TFM ya EWE ka koi Order Received order nahi mila."
+        );
+      } else if (emptyCouriers.length > 0) {
+        alert(
+          `${downloadedFiles} courier file download ho gayi. ${emptyCouriers.join(
+            " aur "
+          )} ke matching orders nahi mile.`
+        );
+      }
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Courier download failed"
+      );
+    } finally {
+      setDownloadingCourierFiles(false);
+    }
+  }
+
+  // ADMIN_ORDER_DELETE_V1: Admin-only order deletion from Orders List.
+  async function deleteOrder(order: OrderRecord) {
+    if (!isAdmin) {
+      alert("Only Admin can delete orders.");
+      return;
+    }
+
+    const orderNo = getOrderNo(order);
+    const tableName = String(
+      (order.fields as Record<string, unknown>).__tableName || ""
+    ).trim();
+
+    if (!order.id || !tableName) {
+      alert("Order source information is missing.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete order ${orderNo}?\n\nThis permanently deletes the invoice and its linked order items. This action cannot be undone.`
+    );
+
+    if (!confirmed) return;
+
+    setDeletingOrderId(order.id);
+
+    try {
+      const response = await fetch("/api/orders/list", {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          orderId: order.id,
+          tableName,
+        }),
+      });
+
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok || !data?.success) {
+        alert(data?.message || "Order delete failed");
+        return;
+      }
+
+      setOrders((previous) =>
+        previous.filter((item) => item.id !== order.id)
+      );
+      setSelectedRows((previous) =>
+        previous.filter((id) => id !== order.id)
+      );
+      setSelectedOrder((current) =>
+        current?.id === order.id ? null : current
+      );
+
+      alert(
+        `${orderNo} deleted. Linked item lines deleted: ${Number(
+          data.deletedItemCount || 0
+        )}.`
+      );
+    } catch {
+      alert("Order delete failed");
+    } finally {
+      setDeletingOrderId("");
+    }
+  }
   function handlePrint(order: OrderRecord) {
     const payload = {
       orderNo: getOrderNo(order),
@@ -658,7 +1270,7 @@ export default function OrdersListPage() {
             )}
           </div>
 
-          {orders.length > 0 && capabilities.canUpdateCourier && (
+          {orders.length > 0 && capabilities.canUpdateCourier && !isSupplier && (
             <div className="mb-4 flex flex-wrap items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-3">
               <p className="text-sm font-black text-slate-700">
                 Selected: {selectedRows.length}
@@ -694,6 +1306,19 @@ export default function OrdersListPage() {
               >
                 Dispatch Ready Orders
               </button>
+
+              {isBSOrderEntry && (
+                <button
+                  type="button"
+                  onClick={downloadCourierFiles}
+                  disabled={downloadingCourierFiles || bulkSaving}
+                  className="h-10 rounded-xl border border-cyan-700 bg-cyan-600 px-4 text-sm font-black text-white disabled:opacity-50"
+                >
+                  {downloadingCourierFiles
+                    ? "Preparing Courier Files..."
+                    : "Courier Download"}
+                </button>
+              )}
 
               {supportsDriverSheet && (
                 <button
@@ -738,11 +1363,11 @@ export default function OrdersListPage() {
               </div>
             ) : (
               <>
-                <table className="w-full min-w-[1180px] border-collapse text-sm">
+                <table className="w-full min-w-[1320px] border-collapse text-sm">
                   <thead className="sticky top-0 z-20 bg-slate-200 text-slate-900 shadow-sm">
                     <tr>
                       <th className="w-[60px] px-4 py-4 text-left">
-                        {capabilities.canUpdateCourier && (
+                        {capabilities.canUpdateCourier && !isSupplier && (
                           <input
                             type="checkbox"
                             checked={
@@ -753,7 +1378,7 @@ export default function OrdersListPage() {
                           />
                         )}
                       </th>
-                      <th className="w-[130px] px-4 py-4 text-left">
+                      <th className="w-[240px] px-4 py-4 text-left">
                         Order No
                       </th>
                       <th className="w-[210px] px-4 py-4 text-left">
@@ -764,31 +1389,44 @@ export default function OrdersListPage() {
                         Order Date
                       </th>
                       <th className="w-[150px] px-4 py-4 text-left">Store</th>
-                      <th className="w-[180px] px-4 py-4 text-left">
+                      <th className="w-[220px] px-4 py-4 text-left">
                         Status
                       </th>
                       <th className="w-[120px] px-4 py-4 text-right">
                         Total
                       </th>
-                      <th className="w-[170px] px-4 py-4 text-left">
+                      <th className="w-[190px] px-4 py-4 text-left">
                         Courier
                       </th>
-                      <th className="w-[300px] px-4 py-4 text-right">
+                      <th className="w-[240px] px-4 py-4 text-right">
                         Action
                       </th>
                     </tr>
                   </thead>
 
                   <tbody>
-                    {orders.map((order, index) => (
+                    {displayedOrders.map((order, index) => (
                       <tr
                         key={order.id}
-                        className={`border-t transition hover:bg-blue-50 ${
-                          index % 2 === 0 ? "bg-white" : "bg-slate-50"
+                        className={`border-t transition ${
+                          editingOrderId === order.id
+                            ? "border-amber-300 bg-amber-50"
+                            : isBSOrderEntry &&
+                                isReadyFullInStockOrder(order)
+                              ? "border-blue-300 bg-blue-100 hover:bg-blue-200"
+                              : isBSOrderEntry &&
+                                  getReadyProcessStatus(order) === "green"
+                                ? "border-emerald-300 bg-emerald-100 hover:bg-emerald-200"
+                                : isBSOrderEntry &&
+                                    getReadyProcessStatus(order) === "orange"
+                                  ? "border-orange-300 bg-orange-100 hover:bg-orange-200"
+                                  : index % 2 === 0
+                                    ? "bg-white hover:bg-blue-50"
+                                    : "bg-slate-50 hover:bg-blue-50"
                         }`}
                       >
                         <td className="px-4 py-3">
-                          {capabilities.canUpdateCourier && (
+                          {capabilities.canUpdateCourier && !isSupplier && (
                             <input
                               type="checkbox"
                               checked={selectedRows.includes(order.id)}
@@ -798,8 +1436,60 @@ export default function OrdersListPage() {
                         </td>
 
                         <td className="px-4 py-3 font-black text-slate-900">
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <span>{getOrderNo(order)}</span>
+                            {getCourierStatus(order) && (
+                              <span
+                                title={`Courier status: ${getCourierStatus(order)}`}
+                                className={`inline-flex rounded-full border px-2 py-1 text-[10px] font-black uppercase ${getCourierStatusBadgeClass(
+                                  getCourierStatus(order)
+                                )}`}
+                              >
+                                {getCourierStatus(order)}
+                              </span>
+                            )}
+                            {isBSOrderEntry &&
+                              isReadyFullInStockOrder(order) && (
+                                <span className="rounded-full bg-blue-600 px-2 py-1 text-[10px] font-black text-white">
+                                  IN STOCK FULL
+                                </span>
+                              )}
+
+                            {isBSOrderEntry &&
+                              !isReadyFullInStockOrder(order) &&
+                              getReadyProcessStatus(order) === "green" && (
+                                <span
+                                  title={getReadyProcessTitle(order)}
+                                  className="rounded-full bg-emerald-600 px-2 py-1 text-[10px] font-black text-white"
+                                >
+                                  READY TO PROCESS
+                                </span>
+                              )}
+
+                            {isBSOrderEntry &&
+                              !isReadyFullInStockOrder(order) &&
+                              getReadyProcessStatus(order) === "orange" && (
+                                <span
+                                  title={getReadyProcessTitle(order)}
+                                  className="rounded-full bg-orange-600 px-2 py-1 text-[10px] font-black text-white"
+                                >
+                                  READY — PARTIAL / SOLD OUT
+                                </span>
+                              )}
+
+                            {isBSOrderEntry &&
+                              !getReadyProcessStatus(order) &&
+                              isPartialInStockOrder(order) && (
+                                <span className="rounded-full bg-amber-500 px-2 py-1 text-[10px] font-black text-white">
+                                  IN STOCK PARTIAL
+                                </span>
+                              )}
+
+                            {isBSOrderEntry && isReturnOrder(order) && (
+                              <span className="rounded-full bg-red-600 px-2 py-1 text-[10px] font-black text-white">
+                                RTS
+                              </span>
+                            )}
                             {getSource(order) &&
                               !["BS Invoice", "FAB Invoice", "Invoice"].includes(
                                 getSource(order)
@@ -828,7 +1518,37 @@ export default function OrdersListPage() {
                         </td>
 
                         <td className="px-4 py-3 font-bold text-slate-700">
-                          {order.fields.order_status ?? "-"}
+                          {editingOrderId === order.id &&
+                          getRowCapability(
+                            order,
+                            "__canUpdateStatus",
+                            capabilities.canUpdateStatus
+                          ) ? (
+                            <select
+                              value={inlineDraft.status}
+                              onChange={(event) =>
+                                setInlineDraft((previous) => ({
+                                  ...previous,
+                                  status: event.target.value,
+                                }))
+                              }
+                              disabled={savingKey === `${order.id}-inline`}
+                              className="h-10 w-full rounded-xl border border-blue-300 bg-white px-3 text-sm font-bold outline-none focus:border-blue-600 disabled:opacity-60"
+                            >
+                              <option value="">Blank</option>
+                              {getRowOptions(
+                                order,
+                                "__statusOptions",
+                                statusOptions
+                              ).map((option) => (
+                                <option key={option} value={option}>
+                                  {option}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            order.fields.order_status ?? "-"
+                          )}
                         </td>
 
                         <td className="px-4 py-3 text-right font-black text-slate-900">
@@ -836,58 +1556,177 @@ export default function OrdersListPage() {
                         </td>
 
                         <td className="px-4 py-3 font-bold text-slate-700">
-                          {order.fields.Courier ?? "-"}
+                          {editingOrderId === order.id &&
+                          getRowCapability(
+                            order,
+                            "__canUpdateCourier",
+                            capabilities.canUpdateCourier
+                          ) ? (
+                            <select
+                              value={inlineDraft.courier}
+                              onChange={(event) =>
+                                setInlineDraft((previous) => ({
+                                  ...previous,
+                                  courier: event.target.value,
+                                }))
+                              }
+                              disabled={savingKey === `${order.id}-inline`}
+                              className="h-10 w-full rounded-xl border border-blue-300 bg-white px-3 text-sm font-bold outline-none focus:border-blue-600 disabled:opacity-60"
+                            >
+                              <option value="">Blank</option>
+                              {getRowOptions(
+                                order,
+                                "__courierOptions",
+                                courierOptions
+                              ).map((option) => (
+                                <option key={option} value={option}>
+                                  {option}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            order.fields.Courier ?? "-"
+                          )}
                         </td>
 
                         <td className="px-4 py-3 text-right">
                           <div className="flex flex-nowrap justify-end gap-2">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                router.push(
+                            {editingOrderId === order.id ? (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => saveInlineEdit(order)}
+                                  disabled={savingKey === `${order.id}-inline`}
+                                  title={savingKey === `${order.id}-inline` ? "Saving" : "Save changes"}
+                                  aria-label={savingKey === `${order.id}-inline` ? "Saving changes" : "Save changes"}
+                                  className="flex h-10 w-10 items-center justify-center rounded-xl border border-green-700 bg-green-600 text-lg font-black text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  {savingKey === `${order.id}-inline` ? "⏳" : "✓"}
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={cancelInlineEdit}
+                                  disabled={savingKey === `${order.id}-inline`}
+                                  title="Cancel editing"
+                                  aria-label="Cancel editing"
+                                  className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-300 bg-white text-lg font-black text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  ✕
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    router.push(
                                   `/orders/view/${encodeURIComponent(
                                     getOrderNo(order)
                                   )}`
                                 )
                               }
-                              className="h-10 min-w-[86px] rounded-xl border border-slate-300 bg-white px-3 text-sm font-black text-slate-800 hover:bg-slate-100"
+                              title="View order"
+                              aria-label="View order"
+                              className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-300 bg-white text-lg text-slate-800 hover:bg-slate-100"
                             >
-                              👁 View
+                              👁
                             </button>
+
+                            {!isSupplier &&
+                              (getRowCapability(
+                                order,
+                                "__canUpdateStatus",
+                                capabilities.canUpdateStatus
+                              ) ||
+                                getRowCapability(
+                                  order,
+                                  "__canUpdateCourier",
+                                  capabilities.canUpdateCourier
+                                )) && (
+                              <button
+                                type="button"
+                                onClick={() => startInlineEdit(order)}
+                                disabled={Boolean(savingKey)}
+                                title="Quick edit"
+                                aria-label="Quick edit order"
+                                className="flex h-10 w-10 items-center justify-center rounded-xl border border-amber-400 bg-amber-50 text-lg font-black text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                ⚡
+                              </button>
+                            )}
 
                             <button
                               type="button"
                               onClick={() =>
                                 router.push(`/orders/edit/${encodeURIComponent(getOrderNo(order))}`)
                               }
-                              style={{
-                                background: "#2563eb",
-                                color: "#ffffff",
-                                height: "40px",
-                                minWidth: "86px",
-                                padding: "0 12px",
-                                borderRadius: "12px",
-                                fontWeight: 900,
-                              }}
+                              title="Open full edit"
+                              aria-label="Open full edit"
+                              className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-lg font-black text-white hover:bg-blue-700"
                             >
-                              ✏ Edit
+                              ✏
                             </button>
+
+                            {isAdmin && isFabDohaNonStock && (
+                              <button
+                                type="button"
+                                onClick={() => moveOrderToFabStock(order)}
+                                disabled={
+                                  movingOrderId === order.id ||
+                                  movedOrderIds.includes(order.id)
+                                }
+                                title={
+                                  movedOrderIds.includes(order.id)
+                                    ? "Added to FAB Stock"
+                                    : movingOrderId === order.id
+                                      ? "Adding to FAB Stock"
+                                      : "Add to FAB Stock"
+                                }
+                                aria-label={
+                                  movedOrderIds.includes(order.id)
+                                    ? "Added to FAB Stock"
+                                    : movingOrderId === order.id
+                                      ? "Adding to FAB Stock"
+                                      : "Add to FAB Stock"
+                                }
+                                className="flex h-10 w-10 items-center justify-center rounded-xl border border-emerald-700 bg-emerald-600 text-lg font-black text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                {movedOrderIds.includes(order.id)
+                                  ? "✓"
+                                  : movingOrderId === order.id
+                                    ? "⏳"
+                                    : "📦"}
+                              </button>
+                            )}                            {isAdmin && (
+                              <button
+                                type="button"
+                                onClick={() => deleteOrder(order)}
+                                disabled={deletingOrderId === order.id || Boolean(savingKey)}
+                                title={
+                                  deletingOrderId === order.id
+                                    ? "Deleting order"
+                                    : "Delete order"
+                                }
+                                aria-label="Delete order"
+                                className="flex h-10 w-10 items-center justify-center rounded-xl border border-red-700 bg-red-600 text-lg font-black text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                {deletingOrderId === order.id ? "⏳" : "🗑"}
+                              </button>
+                            )}
+
 
                             <button
                               type="button"
                               onClick={() => handlePrint(order)}
-                              style={{
-                                background: "#111827",
-                                color: "#ffffff",
-                                height: "40px",
-                                minWidth: "86px",
-                                padding: "0 12px",
-                                borderRadius: "12px",
-                                fontWeight: 900,
-                              }}
+                              title="Print order"
+                              aria-label="Print order"
+                              className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-900 text-lg font-black text-white hover:bg-slate-800"
                             >
-                              🖨 Print
+                              🖨
                             </button>
+                              </>
+                            )}
                           </div>
                         </td>
                       </tr>

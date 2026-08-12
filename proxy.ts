@@ -27,7 +27,9 @@ export function proxy(request: NextRequest) {
     pathname.startsWith("/base/select") ||
     pathname.startsWith("/privacy-policy") ||
     pathname.startsWith("/stock/doha") ||
-    pathname.startsWith("/api/public/stock/doha")
+    pathname.startsWith("/api/public/stock/doha") ||
+    pathname === "/gallery" ||
+    pathname.startsWith("/api/public/r2/gallery")
   ) {
     return NextResponse.next();
   }

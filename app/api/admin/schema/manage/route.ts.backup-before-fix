@@ -1,0 +1,1043 @@
+﻿import { NextRequest, NextResponse } from "next/server";
+import { getSession } from "@/lib/auth";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+type SessionBase = {
+  baseName: string;
+  baseId: string;
+  airtableToken?: string;
+  invoiceTable?: string;
+  orderEntryTable?: string;
+  customersTable?: string;
+  productsTable?: string;
+};
+
+type SchemaChoice = {
+  id?: string;
+  name: string;
+  color?: string;
+};
+
+type SchemaField = {
+  id: string;
+  name: string;
+  type: string;
+  description?: string;
+  options?: {
+    choices?: SchemaChoice[];
+    [key: string]: unknown;
+  };
+};
+
+type SchemaView = {
+  id: string;
+  name: string;
+  type: string;
+};
+
+type SchemaTable = {
+  id: string;
+  name: string;
+  description?: string;
+  primaryFieldId?: string;
+  fields?: SchemaField[];
+  views?: SchemaView[];
+};
+
+type SchemaResponse = {
+  tables?: SchemaTable[];
+  error?: { message?: string; type?: string } | string;
+};
+
+const ALLOWED_FIELD_TYPES = new Set([
+  "singleLineText",
+  "multilineText",
+  "number",
+  "checkbox",
+  "date",
+  "dateTime",
+  "singleSelect",
+  "multipleSelects",
+  "email",
+  "phoneNumber",
+  "url",
+  "multipleAttachments",
+]);
+
+function normalize(value: unknown) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function isAdmin(session: any) {
+  return normalize(session?.role) === "admin" || Boolean(session?.superAdmin);
+}
+
+function uniqueBases(bases: SessionBase[]) {
+  const map = new Map<string, SessionBase>();
+
+  for (const base of bases) {
+    if (!base?.baseId || !base?.baseName) continue;
+    const current = map.get(base.baseId);
+    map.set(base.baseId, {
+      ...current,
+      ...base,
+      baseName: base.baseName || current?.baseName || "",
+      airtableToken: base.airtableToken || current?.airtableToken,
+    });
+  }
+
+  return [...map.values()];
+}
+
+async function requireAdmin() {
+  const session = await getSession();
+
+  if (!session) {
+    return {
+      error: NextResponse.json(
+        { success: false, message: "Not authenticated" },
+        { status: 401 },
+      ),
+    } as const;
+  }
+
+  if (!isAdmin(session)) {
+    return {
+      error: NextResponse.json(
+        { success: false, message: "Admin access required" },
+        { status: 403 },
+      ),
+    } as const;
+  }
+
+  const bases = uniqueBases(
+    (session.availableBases?.length
+      ? session.availableBases
+      : session.permissions || []) as SessionBase[],
+  );
+
+  return { session, bases } as const;
+}
+
+function tokenForBase(base: SessionBase) {
+  return (
+    base.airtableToken ||
+    process.env.AIRTABLE_TOKEN ||
+    process.env.AUTH_AIRTABLE_TOKEN ||
+    ""
+  );
+}
+
+function findBase(bases: SessionBase[], baseId: string) {
+  return bases.find((base) => base.baseId === baseId);
+}
+
+function airtableMessage(data: any, fallback: string) {
+  const message =
+    data?.error?.message ||
+    data?.error?.error?.message ||
+    (typeof data?.error === "string" ? data.error : "") ||
+    data?.message ||
+    fallback;
+
+  const errorType =
+    data?.error?.type ||
+    data?.error?.error?.type ||
+    data?.type ||
+    "";
+
+  return errorType && !String(message).includes(errorType)
+    ? `${message} [${errorType}]`
+    : String(message);
+}
+
+async function fetchJson(
+  url: string,
+  token: string,
+  init: RequestInit = {},
+) {
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      ...(init.headers || {}),
+    },
+    cache: "no-store",
+  });
+
+  const text = await response.text();
+  let data: any = {};
+
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text };
+  }
+
+  return { response, data };
+}
+
+async function fetchSchema(base: SessionBase) {
+  const token = tokenForBase(base);
+  if (!token) throw new Error(`Airtable token missing for ${base.baseName}`);
+
+  const { response, data } = await fetchJson(
+    `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(base.baseId)}/tables`,
+    token,
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      airtableMessage(
+        data,
+        `Unable to load Airtable schema for ${base.baseName}`,
+      ),
+    );
+  }
+
+  return ((data as SchemaResponse).tables || []) as SchemaTable[];
+}
+
+function cleanChoices(value: unknown) {
+  const raw = Array.isArray(value)
+    ? value.map(String)
+    : String(value ?? "").split(",");
+  const seen = new Set<string>();
+  const choices: string[] = [];
+
+  for (const item of raw) {
+    const name = String(item || "").trim();
+    const key = normalize(name);
+    if (!name || seen.has(key)) continue;
+    seen.add(key);
+    choices.push(name);
+  }
+
+  return choices;
+}
+
+function fieldOptions(fieldType: string, choices: string[]) {
+  switch (fieldType) {
+    case "number":
+      return { precision: 0 };
+    case "checkbox":
+      return { icon: "check", color: "greenBright" };
+    case "date":
+      return { dateFormat: { name: "local" } };
+    case "dateTime":
+      return {
+        dateFormat: { name: "local" },
+        timeFormat: { name: "24hour" },
+        timeZone: "client",
+      };
+    case "singleSelect":
+    case "multipleSelects":
+      return { choices: choices.map((name) => ({ name })) };
+    default:
+      return undefined;
+  }
+}
+
+function simplifyTables(tables: SchemaTable[]) {
+  return tables.map((table) => ({
+    id: table.id,
+    name: table.name,
+    description: table.description || "",
+    primaryFieldId: table.primaryFieldId || "",
+    fields: (table.fields || []).map((field) => ({
+      id: field.id,
+      name: field.name,
+      type: field.type,
+      description: field.description || "",
+      choices: Array.isArray(field.options?.choices)
+        ? field.options!.choices!.map((choice) => ({
+            id: choice.id,
+            name: choice.name,
+            color: choice.color,
+          }))
+        : [],
+    })),
+    views: (table.views || []).map((view) => ({
+      id: view.id,
+      name: view.name,
+      type: view.type,
+    })),
+  }));
+}
+
+function bodyObject(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function getSelectedTable(tables: SchemaTable[], tableId: string) {
+  return tables.find((table) => table.id === tableId);
+}
+
+async function addSelectOption({
+  base,
+  token,
+  table,
+  field,
+  optionName,
+}: {
+  base: SessionBase;
+  token: string;
+  table: SchemaTable;
+  field: SchemaField;
+  optionName: string;
+}) {
+  if (!["singleSelect", "multipleSelects"].includes(field.type)) {
+    return NextResponse.json(
+      {
+        success: false,
+        message: `Field must be Single Select or Multiple Select. Current type is ${field.type}.`,
+      },
+      { status: 400 },
+    );
+  }
+
+  const currentChoices = Array.isArray(field.options?.choices)
+    ? field.options!.choices!
+    : [];
+  const existing = currentChoices.find(
+    (choice) => normalize(choice.name) === normalize(optionName),
+  );
+
+  if (existing) {
+    return NextResponse.json({
+      success: true,
+      alreadyExists: true,
+      message: `Option "${existing.name}" already exists in ${table.name} â†’ ${field.name}.`,
+    });
+  }
+
+  const dataUrl = `https://api.airtable.com/v0/${encodeURIComponent(
+    base.baseId,
+  )}/${encodeURIComponent(table.id)}`;
+  let temporaryRecordId = "";
+
+  try {
+    const fieldValue =
+      field.type === "multipleSelects" ? [optionName] : optionName;
+    const { response, data } = await fetchJson(dataUrl, token, {
+      method: "POST",
+      body: JSON.stringify({
+        records: [{ fields: { [field.name]: fieldValue } }],
+        typecast: true,
+      }),
+    });
+
+    if (!response.ok) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: airtableMessage(
+            data,
+            "Airtable could not add this select option. Creator-level permission may be required.",
+          ),
+        },
+        { status: response.status },
+      );
+    }
+
+    temporaryRecordId = String(data?.records?.[0]?.id || "").trim();
+
+    if (!temporaryRecordId) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            "Airtable created the option but did not return the temporary record ID. Verify the table before retrying.",
+        },
+        { status: 500 },
+      );
+    }
+  } finally {
+    if (temporaryRecordId) {
+      const cleanup = await fetchJson(
+        `${dataUrl}/${encodeURIComponent(temporaryRecordId)}`,
+        token,
+        { method: "DELETE" },
+      ).catch(() => null);
+
+      if (cleanup && !cleanup.response.ok) {
+        console.error(
+          "Airtable temporary select-option record cleanup failed",
+          temporaryRecordId,
+          cleanup.response.status,
+        );
+      }
+    }
+  }
+
+  const refreshedTables = await fetchSchema(base);
+  const refreshedTable = refreshedTables.find((item) => item.id === table.id);
+  const refreshedField = (refreshedTable?.fields || []).find(
+    (item) => item.id === field.id,
+  );
+  const refreshedChoices = Array.isArray(refreshedField?.options?.choices)
+    ? refreshedField!.options!.choices!
+    : [];
+  const createdChoice = refreshedChoices.find(
+    (choice) => normalize(choice.name) === normalize(optionName),
+  );
+
+  if (!createdChoice) {
+    return NextResponse.json(
+      {
+        success: false,
+        message:
+          "Airtable request completed, but the new select option was not found after schema refresh.",
+      },
+      { status: 500 },
+    );
+  }
+
+  return NextResponse.json({
+    success: true,
+    message: `Option "${createdChoice.name}" added to ${base.baseName} â†’ ${table.name} â†’ ${field.name}.`,
+    choice: {
+      id: createdChoice.id || "",
+      name: createdChoice.name,
+      color: createdChoice.color || "",
+    },
+  });
+}
+
+export async function GET(request: NextRequest) {
+  try {
+    const access = await requireAdmin();
+    if ("error" in access) return access.error;
+
+    const mode = String(request.nextUrl.searchParams.get("mode") || "schema");
+    const requestedBaseId = String(
+      request.nextUrl.searchParams.get("baseId") || "",
+    ).trim();
+    const selectedBase = requestedBaseId
+      ? findBase(access.bases, requestedBaseId)
+      : access.bases[0];
+
+    if (!selectedBase) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "No Airtable base is available for this Admin session",
+        },
+        { status: 404 },
+      );
+    }
+
+    const token = tokenForBase(selectedBase);
+    if (!token) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: `Airtable token missing for ${selectedBase.baseName}`,
+        },
+        { status: 400 },
+      );
+    }
+
+    const tables = await fetchSchema(selectedBase);
+
+    if (mode === "records") {
+      const tableId = String(
+        request.nextUrl.searchParams.get("tableId") || "",
+      ).trim();
+      const table = getSelectedTable(tables, tableId);
+
+      if (!table) {
+        return NextResponse.json(
+          { success: false, message: "Selected Airtable table was not found" },
+          { status: 404 },
+        );
+      }
+
+      const requestedPageSize = Number(
+        request.nextUrl.searchParams.get("pageSize") || 50,
+      );
+      const pageSize = Number.isFinite(requestedPageSize)
+        ? Math.min(100, Math.max(1, Math.floor(requestedPageSize)))
+        : 50;
+      const offset = String(
+        request.nextUrl.searchParams.get("offset") || "",
+      ).trim();
+      const params = new URLSearchParams({ pageSize: String(pageSize) });
+      if (offset) params.set("offset", offset);
+
+      const { response, data } = await fetchJson(
+        `https://api.airtable.com/v0/${encodeURIComponent(
+          selectedBase.baseId,
+        )}/${encodeURIComponent(table.id)}?${params.toString()}`,
+        token,
+      );
+
+      if (!response.ok) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: airtableMessage(data, "Airtable records could not load"),
+          },
+          { status: response.status },
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        baseId: selectedBase.baseId,
+        baseName: selectedBase.baseName,
+        tableId: table.id,
+        tableName: table.name,
+        records: Array.isArray(data?.records) ? data.records : [],
+        offset: String(data?.offset || ""),
+      });
+    }
+
+    return NextResponse.json({
+      success: true,
+      bases: access.bases.map((base) => ({
+        baseId: base.baseId,
+        baseName: base.baseName,
+      })),
+      selectedBaseId: selectedBase.baseId,
+      selectedBaseName: selectedBase.baseName,
+      tables: simplifyTables(tables),
+      capabilities: {
+        createTable: true,
+        updateTableNameDescription: true,
+        createField: true,
+        updateFieldNameDescription: true,
+        addSelectOption: true,
+        listViews: true,
+        recordCreateUpdateDelete: true,
+        bulkDeleteRecords: true,
+        deleteSelectOption: false,
+        deleteField: false,
+        deleteTable: false,
+        changeFieldType: false,
+      },
+    });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        success: false,
+        message:
+          error instanceof Error
+            ? error.message
+            : "Airtable administration failed",
+      },
+      { status: 500 },
+    );
+  }
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const access = await requireAdmin();
+    if ("error" in access) return access.error;
+
+    const body = await request.json();
+    const action = String(body?.action || "").trim();
+    const baseId = String(body?.baseId || "").trim();
+    const base = findBase(access.bases, baseId);
+
+    if (!base) {
+      return NextResponse.json(
+        { success: false, message: "Select a permitted Airtable Base" },
+        { status: 400 },
+      );
+    }
+
+    const token = tokenForBase(base);
+    if (!token) {
+      return NextResponse.json(
+        { success: false, message: `Airtable token missing for ${base.baseName}` },
+        { status: 400 },
+      );
+    }
+
+    if (action === "create_table") {
+      const tableName = String(body?.tableName || "").trim();
+      const description = String(body?.description || "").trim();
+      const primaryFieldName =
+        String(body?.primaryFieldName || "Name").trim() || "Name";
+
+      if (!tableName || tableName.length > 100) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "Table name is required and must be 100 characters or less",
+          },
+          { status: 400 },
+        );
+      }
+
+      const tables = await fetchSchema(base);
+      if (tables.some((table) => normalize(table.name) === normalize(tableName))) {
+        return NextResponse.json(
+          { success: false, message: `Table "${tableName}" already exists` },
+          { status: 409 },
+        );
+      }
+
+      const payload: Record<string, unknown> = {
+        name: tableName,
+        fields: [{ name: primaryFieldName, type: "singleLineText" }],
+      };
+      if (description) payload.description = description;
+
+      const { response, data } = await fetchJson(
+        `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(
+          base.baseId,
+        )}/tables`,
+        token,
+        { method: "POST", body: JSON.stringify(payload) },
+      );
+
+      if (!response.ok) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: airtableMessage(
+              data,
+              "Airtable table creation failed. Confirm schema.bases:write and Creator permission.",
+            ),
+          },
+          { status: response.status },
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: `Table "${tableName}" created in ${base.baseName}.`,
+        table: data,
+      });
+    }
+
+    const tableId = String(body?.tableId || "").trim();
+    if (!tableId) {
+      return NextResponse.json(
+        { success: false, message: "Select an Airtable Table" },
+        { status: 400 },
+      );
+    }
+
+    const tables = await fetchSchema(base);
+    const table = getSelectedTable(tables, tableId);
+
+    if (!table) {
+      return NextResponse.json(
+        { success: false, message: "Selected Airtable table was not found" },
+        { status: 404 },
+      );
+    }
+
+    if (action === "update_table") {
+      const tableName = String(body?.tableName || "").trim();
+      const description = String(body?.description ?? "").trim();
+
+      if (!tableName || tableName.length > 100) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "Table name is required and must be 100 characters or less",
+          },
+          { status: 400 },
+        );
+      }
+
+      const duplicate = tables.some(
+        (item) =>
+          item.id !== table.id && normalize(item.name) === normalize(tableName),
+      );
+      if (duplicate) {
+        return NextResponse.json(
+          { success: false, message: `Another table named "${tableName}" already exists` },
+          { status: 409 },
+        );
+      }
+
+      const { response, data } = await fetchJson(
+        `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(
+          base.baseId,
+        )}/tables/${encodeURIComponent(table.id)}`,
+        token,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ name: tableName, description }),
+        },
+      );
+
+      if (!response.ok) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: airtableMessage(data, "Airtable table update failed"),
+          },
+          { status: response.status },
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: `Table settings updated: ${tableName}.`,
+        table: data,
+      });
+    }
+
+    if (action === "create_field") {
+      const fieldName = String(body?.fieldName || "").trim();
+      const fieldType = String(body?.fieldType || "").trim();
+      const description = String(body?.description || "").trim();
+      const choices = cleanChoices(body?.choices);
+
+      if (!fieldName || fieldName.length > 100) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "Field name is required and must be 100 characters or less",
+          },
+          { status: 400 },
+        );
+      }
+
+      if (!ALLOWED_FIELD_TYPES.has(fieldType)) {
+        return NextResponse.json(
+          { success: false, message: "Unsupported field type in Simple Creator" },
+          { status: 400 },
+        );
+      }
+
+      if (
+        (table.fields || []).some(
+          (field) => normalize(field.name) === normalize(fieldName),
+        )
+      ) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: `Field "${fieldName}" already exists in ${table.name}`,
+          },
+          { status: 409 },
+        );
+      }
+
+      if (
+        ["singleSelect", "multipleSelects"].includes(fieldType) &&
+        choices.length === 0
+      ) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "At least one choice is required for a Select field",
+          },
+          { status: 400 },
+        );
+      }
+
+      const payload: Record<string, unknown> = {
+        name: fieldName,
+        type: fieldType,
+      };
+      if (description) payload.description = description;
+      const options = fieldOptions(fieldType, choices);
+      if (options) payload.options = options;
+
+      const { response, data } = await fetchJson(
+        `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(
+          base.baseId,
+        )}/tables/${encodeURIComponent(table.id)}/fields`,
+        token,
+        { method: "POST", body: JSON.stringify(payload) },
+      );
+
+      if (!response.ok) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: airtableMessage(
+              data,
+              "Airtable field creation failed. Confirm schema.bases:write permission.",
+            ),
+          },
+          { status: response.status },
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: `Field "${fieldName}" created in ${base.baseName} â†’ ${table.name}.`,
+        field: data,
+      });
+    }
+
+    if (action === "update_field") {
+      const fieldId = String(body?.fieldId || "").trim();
+      const field = (table.fields || []).find((item) => item.id === fieldId);
+      const fieldName = String(body?.fieldName || "").trim();
+      const description = String(body?.description ?? "").trim();
+
+      if (!field) {
+        return NextResponse.json(
+          { success: false, message: "Selected Airtable field was not found" },
+          { status: 404 },
+        );
+      }
+
+      if (!fieldName || fieldName.length > 100) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "Field name is required and must be 100 characters or less",
+          },
+          { status: 400 },
+        );
+      }
+
+      const duplicate = (table.fields || []).some(
+        (item) =>
+          item.id !== field.id && normalize(item.name) === normalize(fieldName),
+      );
+      if (duplicate) {
+        return NextResponse.json(
+          { success: false, message: `Another field named "${fieldName}" already exists` },
+          { status: 409 },
+        );
+      }
+
+      const { response, data } = await fetchJson(
+        `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(
+          base.baseId,
+        )}/tables/${encodeURIComponent(table.id)}/fields/${encodeURIComponent(
+          field.id,
+        )}`,
+        token,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ name: fieldName, description }),
+        },
+      );
+
+      if (!response.ok) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: airtableMessage(data, "Airtable field update failed"),
+          },
+          { status: response.status },
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: `Field updated: ${fieldName}.`,
+        field: data,
+      });
+    }
+
+    if (action === "add_select_option") {
+      const fieldId = String(body?.fieldId || "").trim();
+      const optionName = String(body?.optionName || "").trim();
+      const field = (table.fields || []).find((item) => item.id === fieldId);
+
+      if (!field) {
+        return NextResponse.json(
+          { success: false, message: "Select a valid Single/Multi Select field" },
+          { status: 404 },
+        );
+      }
+
+      if (!optionName || optionName.length > 100) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "Option name is required and must be 100 characters or less",
+          },
+          { status: 400 },
+        );
+      }
+
+      return addSelectOption({ base, token, table, field, optionName });
+    }
+
+    const dataUrl = `https://api.airtable.com/v0/${encodeURIComponent(
+      base.baseId,
+    )}/${encodeURIComponent(table.id)}`;
+
+    if (action === "create_record") {
+      const fields = bodyObject(body?.fields);
+      if (!fields) {
+        return NextResponse.json(
+          { success: false, message: "Record fields must be a JSON object" },
+          { status: 400 },
+        );
+      }
+
+      const { response, data } = await fetchJson(dataUrl, token, {
+        method: "POST",
+        body: JSON.stringify({ records: [{ fields }], typecast: true }),
+      });
+
+      if (!response.ok) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: airtableMessage(data, "Airtable record creation failed"),
+          },
+          { status: response.status },
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: "Airtable record created.",
+        record: data?.records?.[0] || null,
+      });
+    }
+
+    if (action === "update_record") {
+      const recordId = String(body?.recordId || "").trim();
+      const fields = bodyObject(body?.fields);
+
+      if (!recordId.startsWith("rec") || !fields) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "Valid record ID and fields JSON object are required",
+          },
+          { status: 400 },
+        );
+      }
+
+      const { response, data } = await fetchJson(dataUrl, token, {
+        method: "PATCH",
+        body: JSON.stringify({
+          records: [{ id: recordId, fields }],
+          typecast: true,
+        }),
+      });
+
+      if (!response.ok) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: airtableMessage(data, "Airtable record update failed"),
+          },
+          { status: response.status },
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: `Record ${recordId} updated.`,
+        record: data?.records?.[0] || null,
+      });
+    }
+
+    if (action === "delete_record") {
+      const recordId = String(body?.recordId || "").trim();
+      if (!recordId.startsWith("rec")) {
+        return NextResponse.json(
+          { success: false, message: "Valid Airtable record ID is required" },
+          { status: 400 },
+        );
+      }
+
+      const { response, data } = await fetchJson(
+        `${dataUrl}/${encodeURIComponent(recordId)}`,
+        token,
+        { method: "DELETE" },
+      );
+
+      if (!response.ok) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: airtableMessage(data, "Airtable record delete failed"),
+          },
+          { status: response.status },
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: `Record ${recordId} deleted.`,
+        deleted: data,
+      });
+    }
+
+    if (action === "bulk_delete_records") {
+      const rawIds = Array.isArray(body?.recordIds) ? body.recordIds : [];
+      const recordIds = Array.from(
+        new Set(
+          rawIds
+            .map((value: unknown) => String(value || "").trim())
+            .filter((value: string) => value.startsWith("rec")),
+        ),
+      ).slice(0, 500);
+
+      if (!recordIds.length) {
+        return NextResponse.json(
+          { success: false, message: "Select at least one Airtable record" },
+          { status: 400 },
+        );
+      }
+
+      let deleted = 0;
+      const failures: Array<{ recordId: string; message: string }> = [];
+
+      for (let index = 0; index < recordIds.length; index += 10) {
+        const chunk = recordIds.slice(index, index + 10);
+        const params = new URLSearchParams();
+        for (const recordId of chunk) params.append("records[]", String(recordId));
+
+        const { response, data } = await fetchJson(
+          `${dataUrl}?${params.toString()}`,
+          token,
+          { method: "DELETE" },
+        );
+
+        if (response.ok) {
+          deleted += Array.isArray(data?.records)
+            ? data.records.filter((item: any) => item?.deleted).length
+            : chunk.length;
+        } else {
+          const message = airtableMessage(data, "Bulk record delete failed");
+          failures.push(...chunk.map((recordId) => ({ recordId, message })));
+        }
+      }
+
+      return NextResponse.json({
+        success: failures.length === 0,
+        partial: deleted > 0 && failures.length > 0,
+        message: failures.length
+          ? `${deleted} record(s) deleted; ${failures.length} failed.`
+          : `${deleted} record(s) deleted.`,
+        deleted,
+        failed: failures.length,
+        failures: failures.slice(0, 20),
+      });
+    }
+
+    return NextResponse.json(
+      { success: false, message: "Unsupported Airtable Admin action" },
+      { status: 400 },
+    );
+  } catch (error) {
+    return NextResponse.json(
+      {
+        success: false,
+        message:
+          error instanceof Error
+            ? error.message
+            : "Airtable administration failed",
+      },
+      { status: 500 },
+    );
+  }
+}
+

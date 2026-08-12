@@ -180,7 +180,10 @@ function resolveStockReceivedSetup(tables: SchemaTable[]) {
     ["Stock -", "Stock Out", "Deduct Qty"]
   );
 
-  const categoryField = undefined;
+  const categoryField = findWritableField(
+    stockReceivedTable.fields,
+    ["Category", "Product Category", "Stock Category"]
+  );
 
   const attachmentsField = findWritableField(
     stockReceivedTable.fields,

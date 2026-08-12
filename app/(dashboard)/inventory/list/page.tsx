@@ -1,6 +1,8 @@
 "use client";
 
+import { Suspense } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+
 import { useSearchParams } from "next/navigation";
 import {
   ArrowDownUp,
@@ -28,7 +30,7 @@ type SortOption =
   | "price-desc"
   | "price-asc";
 
-export default function InventoryListPage() {
+function InventoryListContent() {
   const searchParams = useSearchParams();
   const requestedType =
     searchParams.get("type") === "fab-stock"
@@ -374,5 +376,14 @@ export default function InventoryListPage() {
         )}
       </div>
     </div>
+  );
+}
+
+
+export default function InventoryListPage() {
+  return (
+    <Suspense fallback={<div className="p-6 font-bold">Loading...</div>}>
+      <InventoryListContent />
+    </Suspense>
   );
 }

@@ -4,6 +4,10 @@ import {
   airtableUrl,
   getCurrentAirtableBase,
 } from "@/lib/airtable";
+import {
+  resolveInvoiceIdsForOrderEntryRecords,
+  syncInvoiceInstockStatuses,
+} from "@/lib/order-instock-sync";
 
 async function recordExists(
   baseId: string,
@@ -100,6 +104,28 @@ export async function DELETE(req: NextRequest) {
       ? "DQ Order Entry"
       : airtable.tables?.orderEntry || "BS Order Entry";
 
+    const invoiceTableName = isI5qDqBase
+      ? "DQ Invoice"
+      : airtable.tables?.invoice || "BS Invoice";
+
+    let linkedInvoiceIds: string[] = [];
+
+    try {
+      linkedInvoiceIds =
+        await resolveInvoiceIdsForOrderEntryRecords({
+          baseId: airtable.baseId,
+          token: airtable.token,
+          orderEntryTableName: targetTable,
+          invoiceTableName,
+          recordIds: ids,
+        });
+    } catch (syncError) {
+      console.error(
+        "Unable to resolve invoice before order item delete:",
+        syncError
+      );
+    }
+
     const result = await deleteRecords(
       airtable.baseId,
       airtable.token,
@@ -132,10 +158,32 @@ export async function DELETE(req: NextRequest) {
       );
     }
 
+    let instockSync: unknown = null;
+
+    try {
+      instockSync = await syncInvoiceInstockStatuses({
+        baseId: airtable.baseId,
+        token: airtable.token,
+        orderEntryTableName: targetTable,
+        invoiceTableName,
+        invoiceIds: linkedInvoiceIds,
+      });
+    } catch (syncError) {
+      console.error("Invoice Instock sync after item delete failed:", syncError);
+      instockSync = {
+        success: false,
+        message:
+          syncError instanceof Error
+            ? syncError.message
+            : "Invoice Instock sync failed",
+      };
+    }
+
     return NextResponse.json({
       success: true,
       records: result.data?.records || [],
       table: targetTable,
+      instockSync,
     });
   } catch (error) {
     return NextResponse.json(

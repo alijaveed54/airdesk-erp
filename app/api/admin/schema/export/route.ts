@@ -75,6 +75,14 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    const role = String(session.role || "").trim().toLowerCase();
+    if (role !== "admin" && !session.superAdmin) {
+      return NextResponse.json(
+        { success: false, message: "Admin access required" },
+        { status: 403 },
+      );
+    }
+
     const allBases = (
       session.availableBases?.length
         ? session.availableBases

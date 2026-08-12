@@ -50,6 +50,7 @@ type BaseReport = {
 const EMPTY_SUMMARY: Summary = {
   totalParcels: 0,
   totalValue: 0,
+  value: 0,
   delivered: 0,
   deliveredValue: 0,
   dispatched: 0,
@@ -126,6 +127,27 @@ function exportBase(report: BaseReport, month: string) {
   XLSX.writeFile(
     workbook,
     `${report.baseName.replace(/[^a-zA-Z0-9-_]+/g, "-").toLowerCase()}-courier-${month}.xlsx`
+  );
+}
+
+
+function exportOldOrders(report: BaseReport, month: string) {
+  const rows = report.oldOrders.map((order) => ({
+    "Order No": order.orderNo,
+    Date: order.despatchDate,
+    Days: order.days,
+    [report.deliveryFieldLabel]: order.courier,
+    Store: order.store,
+    Customer: order.customer,
+    Phone: order.phone,
+    Value: Number(order.value.toFixed(2)),
+    Status: order.status,
+  }));
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), "7+ Days Orders");
+  XLSX.writeFile(
+    workbook,
+    `${report.baseName.replace(/[^a-zA-Z0-9-_]+/g, "-").toLowerCase()}-7plus-days-${month}.xlsx`
   );
 }
 
@@ -434,17 +456,27 @@ function BaseCourierBlock({
         </table>
       </div>
 
-      <OldOrdersBlock report={report} />
+      <OldOrdersBlock report={report} month={month} />
     </div>
   );
 }
 
-function OldOrdersBlock({ report }: { report: BaseReport }) {
+function OldOrdersBlock({ report, month }: { report: BaseReport; month: string }) {
   return (
     <div className="rounded-2xl border border-red-200 p-4">
+      <div className="flex items-center justify-between gap-3">
       <h3 className="font-black text-red-800">
         7+ Days Old {report.deliveryFieldLabel} Orders: {report.oldOrders.length}
       </h3>
+      <button
+        type="button"
+        onClick={() => exportOldOrders(report, month)}
+        disabled={report.oldOrders.length === 0}
+        className="h-10 rounded-xl border border-red-300 bg-red-50 px-4 text-sm font-black text-red-700 disabled:opacity-50"
+      >
+        Export Excel
+      </button>
+    </div>
 
       <div className="mt-3 overflow-auto rounded-xl border">
         <table className="w-full min-w-[1050px] text-sm">

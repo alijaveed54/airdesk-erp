@@ -57,7 +57,8 @@ export async function POST(request: Request) {
     const updatedSession: AuthSession = {
       ...session,
       permissions: reorderedPermissions,
-      selectedBase: undefined,
+      availableBases: undefined,
+      selectedBase,
     };
 
     const response = NextResponse.json({

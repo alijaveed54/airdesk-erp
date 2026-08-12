@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect } from "react";
+import { Suspense, useEffect } from "react";
 import { useSearchParams } from "next/navigation";
 
-export default function PrintOrderPage() {
+function PrintOrderContent() {
   const searchParams = useSearchParams();
   const data = searchParams.get("data");
 
@@ -220,5 +220,13 @@ export default function PrintOrderPage() {
 </div>
       </main>
     </>
+  );
+}
+
+export default function PrintOrderPage() {
+  return (
+    <Suspense fallback={<div className="p-8 font-bold">Loading...</div>}>
+      <PrintOrderContent />
+    </Suspense>
   );
 }

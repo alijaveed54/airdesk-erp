@@ -98,11 +98,27 @@ export default function EditOrderPage() {
   }
 
   async function loadOrderStatusOptions() {
-    const res = await fetch("/api/options/order-status");
+    const res = await fetch("/api/options/order-status", {
+      cache: "no-store",
+    });
     const data = await res.json();
 
     if (res.ok && data.success) {
-      setOrderStatusOptions(data.options || []);
+      const options = Array.isArray(data.options)
+        ? data.options
+        : Array.isArray(data.statusOptions)
+          ? data.statusOptions
+          : [];
+
+      setOrderStatusOptions(
+        Array.from(
+          new Set(
+            options
+              .map((value: unknown) => String(value || "").trim())
+              .filter(Boolean)
+          )
+        )
+      );
     }
   }
 
@@ -324,6 +340,18 @@ export default function EditOrderPage() {
     loadSupplierOptions();
     if (orderNo) loadOrder();
   }, [orderNo]);
+
+  useEffect(() => {
+    const currentStatus = String(invoiceForm.status || "").trim();
+
+    if (!currentStatus) return;
+
+    setOrderStatusOptions((current) =>
+      current.includes(currentStatus)
+        ? current
+        : [currentStatus, ...current]
+    );
+  }, [invoiceForm.status]);
 
   function getItemsSubtotal() {
     return itemForms.reduce(

@@ -16,6 +16,7 @@ type StoreRow = {
   returned: number;
   returnedValue: number;
   cancelled: number;
+  cancelledValue: number;
 };
 
 type ReportSummary = {
@@ -30,6 +31,7 @@ type ReportSummary = {
   returned: number;
   returnedValue: number;
   cancelled: number;
+  cancelledValue: number;
 };
 
 type BaseReport = {
@@ -51,6 +53,7 @@ const EMPTY_SUMMARY: ReportSummary = {
   returned: 0,
   returnedValue: 0,
   cancelled: 0,
+  cancelledValue: 0,
 };
 
 function currentMonth() {
@@ -92,6 +95,7 @@ function exportSingleReport(report: BaseReport, month: string) {
       Returned: row.returned,
       "Returned Value": Number(row.returnedValue.toFixed(2)),
       Cancelled: row.cancelled,
+      "Cancelled Value": Number(row.cancelledValue.toFixed(2)),
     })),
     {
       Store: "TOTAL",
@@ -106,6 +110,7 @@ function exportSingleReport(report: BaseReport, month: string) {
       Returned: report.summary.returned,
       "Returned Value": Number(report.summary.returnedValue.toFixed(2)),
       Cancelled: report.summary.cancelled,
+      "Cancelled Value": Number(report.summary.cancelledValue.toFixed(2)),
     },
   ];
 
@@ -124,6 +129,7 @@ function exportSingleReport(report: BaseReport, month: string) {
     { wch: 10 },
     { wch: 16 },
     { wch: 10 },
+    { wch: 16 },
   ];
 
   const workbook = XLSX.utils.book_new();
@@ -241,6 +247,9 @@ export default function ReportsPage() {
             row.returnedValue.toFixed(2)
           ),
           Cancelled: row.cancelled,
+          "Cancelled Value": Number(
+            row.cancelledValue.toFixed(2)
+          ),
         })),
         {
           Store: "TOTAL",
@@ -265,6 +274,9 @@ export default function ReportsPage() {
             report.summary.returnedValue.toFixed(2)
           ),
           Cancelled: report.summary.cancelled,
+          "Cancelled Value": Number(
+            report.summary.cancelledValue.toFixed(2)
+          ),
         },
       ];
 
@@ -283,6 +295,7 @@ export default function ReportsPage() {
         { wch: 10 },
         { wch: 16 },
         { wch: 10 },
+        { wch: 16 },
       ];
 
       XLSX.utils.book_append_sheet(
@@ -314,6 +327,9 @@ export default function ReportsPage() {
           summary.returnedValue.toFixed(2)
         ),
         Cancelled: summary.cancelled,
+        "Cancelled Value": Number(
+          summary.cancelledValue.toFixed(2)
+        ),
       },
     ]);
 
@@ -501,7 +517,7 @@ function BaseReportBlock({
       </div>
 
       <div className="overflow-auto rounded-2xl border border-slate-200">
-        <table className="w-full min-w-[1250px] text-sm">
+        <table className="w-full min-w-[1380px] text-sm">
           <thead className="bg-slate-200">
             <tr>
               <th className="px-4 py-3 text-left">
@@ -539,6 +555,9 @@ function BaseReportBlock({
               </th>
               <th className="px-4 py-3 text-center">
                 Cancelled
+              </th>
+              <th className="px-4 py-3 text-right">
+                Value
               </th>
             </tr>
           </thead>
@@ -585,6 +604,9 @@ function BaseReportBlock({
                 <td className="px-4 py-3 text-center font-bold">
                   {row.cancelled}
                 </td>
+                <td className="px-4 py-3 text-right font-black">
+                  {formatAmount(row.cancelledValue)}
+                </td>
               </tr>
             ))}
 
@@ -624,6 +646,9 @@ function BaseReportBlock({
               </td>
               <td className="px-4 py-4 text-center font-black">
                 {report.summary.cancelled}
+              </td>
+              <td className="px-4 py-4 text-right font-black">
+                {formatAmount(report.summary.cancelledValue)}
               </td>
             </tr>
           </tbody>
@@ -682,7 +707,9 @@ function GrandTotalBlock({
       <div className="mt-3">
         <SummaryCard
           title="Cancelled"
-          value={summary.cancelled}
+          value={`${summary.cancelled} / ${formatAmount(
+            summary.cancelledValue
+          )}`}
         />
       </div>
     </div>

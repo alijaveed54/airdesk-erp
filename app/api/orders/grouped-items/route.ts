@@ -36,6 +36,8 @@ type FieldMap = {
   quantity: string;
   supplier: string;
   receivedWh: string;
+  receivedUae: string;
+  receivedUaeDateTime: string;
   billNo: string;
   image: string;
 };
@@ -274,6 +276,21 @@ function buildFieldMap(orderEntryTable: SchemaTable): FieldMap {
       "Warehouse Received",
       "instock",
     ]),
+    receivedUae: getFieldName(fields, [
+      "Received in UAE 2",
+      "Received In UAE 2",
+      "Received in UAE",
+      "Received In UAE",
+      "received_in_uae_2",
+    ]),
+    receivedUaeDateTime: getFieldName(fields, [
+      "Received In UAE DateTime",
+      "Received in UAE DateTime",
+      "Received In UAE Date Time",
+      "Received in UAE Date Time",
+      "Received in UAE Date",
+      "Received In UAE Date",
+    ]),
     billNo: getFieldName(fields, [
       "bill_no",
       "Bill No",
@@ -327,6 +344,10 @@ function normalizeRecord(
     quantity: numberValue(fields[map.quantity]),
     Supplier: textValue(fields[map.supplier]) || "",
     received_in_wh_1: textValue(fields[map.receivedWh]) || "",
+    received_in_uae_2: map.receivedUae ? fields[map.receivedUae] : "",
+    received_in_uae_datetime: map.receivedUaeDateTime
+      ? textValue(fields[map.receivedUaeDateTime])
+      : "",
     bill_no: textValue(fields[map.billNo]) || "",
     image: fields[map.image] || [],
   };
@@ -405,6 +426,9 @@ async function loadI5qDqGroupedOrders({
   const customerFilter = (searchParams.get("customerNumber") || "")
     .trim()
     .toLowerCase();
+  const customerNameFilter = (searchParams.get("customerName") || "")
+    .trim()
+    .toLowerCase();
   const dateFrom = (searchParams.get("dateFrom") || "").trim();
   const dateTo = (searchParams.get("dateTo") || "").trim();
   const statusFilter = (searchParams.get("orderStatus") || "")
@@ -419,6 +443,7 @@ async function loadI5qDqGroupedOrders({
     orderNoFilter ||
       skuFilter ||
       customerFilter ||
+      customerNameFilter ||
       dateFrom ||
       dateTo ||
       statusFilter ||
@@ -649,6 +674,13 @@ async function loadI5qDqGroupedOrders({
         continue;
       }
 
+      if (
+        customerNameFilter &&
+        !customerName.toLowerCase().includes(customerNameFilter)
+      ) {
+        continue;
+      }
+
       if (dateFrom && orderDate < dateFrom) continue;
       if (dateTo && orderDate > dateTo) continue;
 
@@ -687,6 +719,7 @@ async function loadI5qDqGroupedOrders({
           instock: 0,
           dispatchedBySupplier: 0,
           stockOut: 0,
+          receivedInUae: 0,
           items: [],
         });
       }
@@ -787,6 +820,9 @@ export async function GET(req: NextRequest) {
     const customerNumber = (searchParams.get("customerNumber") || "")
       .trim()
       .toLowerCase();
+    const customerName = (searchParams.get("customerName") || "")
+      .trim()
+      .toLowerCase();
     const dateFrom = (searchParams.get("dateFrom") || "").trim();
     const dateTo = (searchParams.get("dateTo") || "").trim();
     const orderStatus = (searchParams.get("orderStatus") || "")
@@ -842,6 +878,7 @@ export async function GET(req: NextRequest) {
       orderNo ||
       sku ||
       customerNumber ||
+      customerName ||
       dateFrom ||
       dateTo ||
       orderStatus ||
@@ -956,6 +993,7 @@ export async function GET(req: NextRequest) {
         const recordOrder = lowerValue(fields["Order Number"]);
         const item = lowerValue(fields["Item Code"]);
         const mobile = lowerValue(fields["Mobile Number"]);
+        const customer = lowerValue(fields.Customer);
         const recordDate = textValue(fields.date);
         const status = lowerValue(fields.Order_status);
         const store = lowerValue(fields.Store);
@@ -963,6 +1001,7 @@ export async function GET(req: NextRequest) {
         if (orderNo && !recordOrder.includes(orderNo)) continue;
         if (sku && !item.includes(sku)) continue;
         if (customerNumber && !mobile.includes(customerNumber)) continue;
+        if (customerName && !customer.includes(customerName)) continue;
         if (dateFrom && recordDate < dateFrom) continue;
         if (dateTo && recordDate > dateTo) continue;
         if (orderStatus && status !== orderStatus) continue;
@@ -996,6 +1035,7 @@ export async function GET(req: NextRequest) {
             numberValue(fields[fieldMap.orderNumber]) ||
             fallbackOrderNumber,
           customer: textValue(fields.Customer) || "",
+          customerNumber: textValue(fields["Mobile Number"]) || "",
           createdDate: textValue(fields["created Date"]) || "",
           date: textValue(fields.date) || "",
           store: textValue(fields.Store) || "",
@@ -1007,6 +1047,7 @@ export async function GET(req: NextRequest) {
           instock: 0,
           pending: 0,
           stockOut: 0,
+          receivedInUae: 0,
         };
       }
 
@@ -1015,6 +1056,12 @@ export async function GET(req: NextRequest) {
       const qty = numberValue(fields.quantity);
       const received =
         lowerValue(fields.received_in_wh_1) === "yes";
+      const receivedInUaeValue = lowerValue(fields.received_in_uae_2);
+      const receivedInUae =
+        receivedInUaeValue === "yes" ||
+        receivedInUaeValue === "true" ||
+        receivedInUaeValue === "1" ||
+        receivedInUaeValue === "checked";
       const billNo = textValue(fields.bill_no).trim();
       const billNoLower = billNo.toLowerCase();
 
@@ -1026,12 +1073,22 @@ export async function GET(req: NextRequest) {
       grouped[groupedOrderNo].totalQty += qty;
       grouped[groupedOrderNo].totalItems += qty;
 
-      if (!received) {
-        grouped[groupedOrderNo].pending += qty;
-      } else if (isStockOut) {
+      // Keep operational summary buckets mutually exclusive.
+      // Priority: Stock Out -> Instock -> Received in UAE -> Pending -> Dispatched.
+      // Instock means the item is received in WH 1 and has no supplier bill number yet.
+      // Instock items must never be counted as Received in UAE, even if a stale UAE flag exists.
+      // Once a dispatched item is received in UAE, it must leave the Dispatched count.
+      // Stock Out / Sold Out items must never be counted as Received in UAE.
+      const isInstock = received && !billNo;
+
+      if (isStockOut) {
         grouped[groupedOrderNo].stockOut += qty;
-      } else if (!billNo) {
+      } else if (isInstock) {
         grouped[groupedOrderNo].instock += qty;
+      } else if (receivedInUae) {
+        grouped[groupedOrderNo].receivedInUae += qty;
+      } else if (!received) {
+        grouped[groupedOrderNo].pending += qty;
       } else {
         grouped[groupedOrderNo].dispatchedBySupplier += qty;
       }

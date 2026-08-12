@@ -1,65 +1,219 @@
-import { NextResponse } from "next/server";
+import {
+  NextRequest,
+  NextResponse,
+} from "next/server";
 import { getSession } from "@/lib/auth";
+import {
+  insertAuditEvents,
+  queryAuditEvents,
+} from "@/lib/audit-db";
+import {
+  deletePendingAuditKey,
+  listPendingAuditKeys,
+  readPendingAuditBatch,
+} from "@/lib/audit-pending";
+import type {
+  JsonValue,
+} from "@/lib/audit-types";
 
-const AUTH_AIRTABLE_TOKEN = process.env.AUTH_AIRTABLE_TOKEN;
-const AUTH_AIRTABLE_BASE_ID = process.env.AUTH_AIRTABLE_BASE_ID;
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-function escapeAirtableString(value: string) {
-  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+async function requireAdmin() {
+  const session = await getSession();
+
+  if (!session) {
+    throw {
+      status: 401,
+      message: "Not authenticated",
+    };
+  }
+
+  if (
+    !session.superAdmin &&
+    session.role !== "Admin"
+  ) {
+    throw {
+      status: 403,
+      message:
+        "Admin access required",
+    };
+  }
+
+  return session;
 }
 
-export async function GET(request: Request) {
-  try {
-    const session = await getSession();
-
-    if (!session) {
-      return NextResponse.json({ success: false, message: "Not authenticated" }, { status: 401 });
-    }
-
-    if (!session.superAdmin && session.role !== "Admin") {
-      return NextResponse.json({ success: false, message: "Admin access required" }, { status: 403 });
-    }
-
-    const { searchParams } = new URL(request.url);
-    const user = searchParams.get("user")?.trim() || "";
-    const moduleName = searchParams.get("module")?.trim() || "";
-    const action = searchParams.get("action")?.trim() || "";
-
-    const params = new URLSearchParams();
-    params.set("pageSize", "100");
-    params.set("sort[0][field]", "Date");
-    params.set("sort[0][direction]", "desc");
-
-    const filters: string[] = [];
-    if (user) filters.push(`LOWER({User})=LOWER('${escapeAirtableString(user)}')`);
-    if (moduleName) filters.push(`LOWER({Module})=LOWER('${escapeAirtableString(moduleName)}')`);
-    if (action) filters.push(`LOWER({Action})=LOWER('${escapeAirtableString(action)}')`);
-
-    if (filters.length === 1) params.set("filterByFormula", filters[0]);
-    if (filters.length > 1) params.set("filterByFormula", `AND(${filters.join(",")})`);
-
-    const response = await fetch(
-      `https://api.airtable.com/v0/${AUTH_AIRTABLE_BASE_ID}/${encodeURIComponent("Activity Log")}?${params.toString()}`,
-      {
-        headers: { Authorization: `Bearer ${AUTH_AIRTABLE_TOKEN}` },
-        cache: "no-store",
-      }
+async function flushPendingAudit(
+  limit = 25
+) {
+  const keys =
+    await listPendingAuditKeys(
+      limit
     );
+  let restored = 0;
 
-    const data = await response.json();
+  for (const key of keys) {
+    try {
+      const events =
+        await readPendingAuditBatch(
+          key
+        );
 
-    if (!response.ok) {
-      return NextResponse.json(
-        { success: false, message: "Activity log failed", error: data },
-        { status: response.status }
+      if (!events?.length) {
+        await deletePendingAuditKey(
+          key
+        );
+        continue;
+      }
+
+      await insertAuditEvents(events, {
+        skipFallback: true,
+      });
+      await deletePendingAuditKey(
+        key
+      );
+      restored += events.length;
+    } catch (error) {
+      console.error(
+        `Pending audit restore failed for ${key}:`,
+        error
+      );
+    }
+  }
+
+  return restored;
+}
+
+function stringifyValue(
+  value: JsonValue
+) {
+  if (
+    value === null ||
+    value === undefined
+  ) {
+    return "";
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  return JSON.stringify(value);
+}
+
+function compatibilityRecord(
+  row: Record<string, JsonValue>
+) {
+  return {
+    id: String(row.id || ""),
+    fields: {
+      Date: row.created_at,
+      User: row.actor_username,
+      "Full Name":
+        row.actor_full_name,
+      Role: row.actor_role,
+      Company: row.company_name,
+      Module: row.module,
+      Action: row.action,
+      Operation: row.operation,
+      "Airtable Table":
+        row.table_name,
+      "Record ID": row.record_id,
+      "Record Label":
+        row.record_label,
+      "Old Value": stringifyValue(
+        row.old_data
+      ),
+      "New Value": stringifyValue(
+        row.new_data
+      ),
+      "Changed Fields":
+        stringifyValue(
+          row.changed_fields
+        ),
+      Source: row.source_host,
+      Note: "",
+      Metadata: stringifyValue(
+        row.metadata
+      ),
+    },
+  };
+}
+
+export async function GET(
+  request: NextRequest
+) {
+  try {
+    await requireAdmin();
+
+    let restored = 0;
+
+    try {
+      restored =
+        await flushPendingAudit(25);
+    } catch (error) {
+      console.error(
+        "Pending audit flush skipped:",
+        error
       );
     }
 
-    return NextResponse.json({ success: true, records: data.records || [] });
+    const params =
+      request.nextUrl.searchParams;
+
+    const result =
+      await queryAuditEvents({
+        user:
+          params.get("user") || "",
+        module:
+          params.get("module") || "",
+        action:
+          params.get("action") || "",
+        company:
+          params.get("company") || "",
+        table:
+          params.get("table") || "",
+        record:
+          params.get("record") || "",
+        operation:
+          params.get("operation") || "",
+        from:
+          params.get("from") || "",
+        to: params.get("to") || "",
+        page: Number(
+          params.get("page") || 1
+        ),
+        limit: Number(
+          params.get("limit") || 50
+        ),
+      });
+
+    return NextResponse.json({
+      success: true,
+      records: result.rows.map(
+        compatibilityRecord
+      ),
+      pagination:
+        result.pagination,
+      restoredPendingEvents:
+        restored,
+    });
   } catch (error) {
+    const known = error as {
+      status?: number;
+      message?: string;
+    };
+
     return NextResponse.json(
-      { success: false, message: error instanceof Error ? error.message : "Activity log failed" },
-      { status: 500 }
+      {
+        success: false,
+        message:
+          known?.message ||
+          "Activity log failed",
+      },
+      {
+        status: known?.status || 500,
+      }
     );
   }
 }

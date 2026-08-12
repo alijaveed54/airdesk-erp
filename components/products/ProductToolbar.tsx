@@ -13,6 +13,8 @@ type Props = {
   search: string;
   onSearchChange: (value: string) => void;
   onSearch: () => void;
+  stockFilter: string;
+  onStockFilterChange: (value: string) => void;
   onRefresh: () => void;
 };
 
@@ -20,6 +22,8 @@ export default function ProductToolbar({
   search,
   onSearchChange,
   onSearch,
+  stockFilter,
+  onStockFilterChange,
   onRefresh,
 }: Props) {
   return (
@@ -50,6 +54,18 @@ export default function ProductToolbar({
         </div>
 
         <div className="flex flex-wrap gap-3">
+
+
+          <select
+            value={stockFilter}
+            onChange={(e) => onStockFilterChange(e.target.value)}
+            className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
+          >
+            <option value="all">All Stock</option>
+            <option value="in">In Stock</option>
+            <option value="out">Out of Stock</option>
+            <option value="low">Low Stock</option>
+          </select>
           <button className="inline-flex items-center gap-2 rounded-2xl border px-4 py-3 hover:bg-slate-50">
             <Plus size={18} />
             Add Product

@@ -50,6 +50,45 @@ function getAgeBucket(line: SupplierLine) {
   return "0-3 Days";
 }
 
+
+function firstTextValue(value: any): string {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const text = firstTextValue(item);
+      if (text) return text;
+    }
+    return "";
+  }
+
+  if (value && typeof value === "object") {
+    return String(
+      value.name ??
+        value.value ??
+        value.text ??
+        value.label ??
+        value.id ??
+        ""
+    ).trim();
+  }
+
+  return String(value ?? "").trim();
+}
+
+function getCustomerCity(line: SupplierLine) {
+  return firstTextValue(
+    line.fields["Customer City"] ??
+      line.fields["Billing Address City"] ??
+      line.fields["Shipping Address City"] ??
+      line.fields["City Name"] ??
+      line.fields.City ??
+      ""
+  );
+}
+
+function isIndiaDispatch(line: SupplierLine) {
+  return getCustomerCity(line).trim().toLowerCase() === "india";
+}
+
 function getSupplierCode(line: SupplierLine) {
   const supplierName = String(line.fields.Supplier || "")
     .trim()
@@ -124,13 +163,20 @@ const ageSummary = lines.reduce(
 
   const [suppliers, setSuppliers] = useState<string[]>([]);
   const [isSupplierUser, setIsSupplierUser] = useState(false);
+  const [currentUserRole, setCurrentUserRole] = useState("");
+  const [manualBillNo, setManualBillNo] = useState("");
+
+  const canCustomizeBillNo = ["admin", "manager", "employee", "staff"].includes(
+    currentUserRole.trim().toLowerCase()
+  );
 
   async function loadUserSession() {
     const res = await fetch("/api/auth/me", { cache: "no-store" });
     const data = await res.json();
 
     if (res.ok && data.success) {
-      const role = data.user?.role;
+      const role = String(data.user?.role || "");
+      setCurrentUserRole(role);
       const selectedBase = data.user?.selectedBase;
       const supplierCode = selectedBase?.supplierCode || data.user?.permissions?.[0]?.supplierCode || "";
 
@@ -268,6 +314,10 @@ async function bulkUpdate(action: "dispatch" | "stock_out") {
           tableName: line._tableName,
         })),
       action,
+      manualBillNo:
+        action === "dispatch" && canCustomizeBillNo
+          ? manualBillNo.trim()
+          : "",
     }),
   });
 
@@ -283,6 +333,9 @@ async function bulkUpdate(action: "dispatch" | "stock_out") {
   if (res.ok && data?.success) {
     setLines((prev) => prev.filter((line) => !selectedRows.includes(line.id)));
     setSelectedRows([]);
+    if (action === "dispatch") {
+      setManualBillNo("");
+    }
   } else {
     alert(data.message || "Bulk update failed");
   }
@@ -316,6 +369,8 @@ function exportToExcel() {
       "Supplier Code": getSupplierCode(line),
       "Item Code": line.fields["Item Code"] ?? "",
       Qty: Number(line.fields.quantity || 0),
+      "Customer City": getCustomerCity(line),
+      "Dispatch Note": isIndiaDispatch(line) ? "Dispatch to India Address" : "",
       "Pending Days": pendingDays,
       "Age Bucket": getAgeBucket(line),
       "Created Date": line.fields["created Date"]
@@ -368,6 +423,12 @@ function exportToExcel() {
         >
           <option value="">Select supplier</option>
 <option value="ALL">All Suppliers</option>
+          {/* MYS-SUPPLIER-UNKNOWN-OPTION-V2 */}
+          {!suppliers.some(
+            (item) => item.trim().toLowerCase() === "unknown supplier"
+          ) && (
+            <option value="Unknown Supplier">Unknown Supplier</option>
+          )}
 
           {suppliers.map((item) => (
             <option key={item} value={item}>
@@ -508,6 +569,22 @@ function exportToExcel() {
       Export Excel
     </button>
 
+    {canCustomizeBillNo && (
+      <div className="min-w-[240px]">
+        <label className="mb-1 block text-xs font-black text-slate-600">
+          Manual Bill Number (Optional)
+        </label>
+        <input
+          type="text"
+          value={manualBillNo}
+          onChange={(event) => setManualBillNo(event.target.value)}
+          placeholder="Blank = automatic bill number"
+          disabled={updatingId === "bulk"}
+          className="h-10 w-full rounded-xl border border-amber-300 bg-amber-50 px-3 text-sm font-black text-slate-900 outline-none focus:border-amber-500 disabled:opacity-50"
+        />
+      </div>
+    )}
+
     <button
       type="button"
       onClick={() => bulkUpdate("dispatch")}
@@ -528,7 +605,7 @@ function exportToExcel() {
   </div>
 )}
         <div className="overflow-auto rounded-2xl border border-slate-200">
-          <table className="w-full min-w-[900px] border-collapse text-sm">
+          <table className="w-full min-w-[1120px] border-collapse text-sm">
             <thead className="bg-slate-200 text-slate-900">
               <tr>
                 <th className="px-4 py-4 text-left">
@@ -548,6 +625,7 @@ function exportToExcel() {
                 <th className="px-4 py-4 text-left">Supplier</th>
                 <th className="px-4 py-4 text-left">Supplier Code</th>
                 <th className="px-4 py-4 text-center">Qty</th>
+                <th className="px-4 py-4 text-left">Dispatch Note</th>
                 <th className="px-4 py-4 text-right">Action</th>
               </tr>
             </thead>
@@ -565,6 +643,8 @@ const orderNo = line.fields["Order Number"]?.[0] ?? "-";
 const pendingDays = getPendingDays(line);
 const ageBucket = getAgeBucket(line);
 const supplierCode = getSupplierCode(line);
+const customerCity = getCustomerCity(line);
+const dispatchToIndia = isIndiaDispatch(line);
 
                 return (
                   <tr
@@ -629,6 +709,21 @@ const supplierCode = getSupplierCode(line);
                       {qty}
                     </td>
 
+                    <td className="px-4 py-3">
+                      {dispatchToIndia ? (
+                        <div className="inline-flex flex-col rounded-xl border-2 border-red-600 bg-red-50 px-3 py-2 text-left shadow-sm">
+                          <span className="text-sm font-black uppercase text-red-700">
+                            Dispatch to India Address
+                          </span>
+                          <span className="mt-0.5 text-xs font-bold text-red-600">
+                            City: {customerCity || "India"}
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="text-slate-400">-</span>
+                      )}
+                    </td>
+
                     <td className="px-4 py-3 text-right">
                       <div className="flex justify-end gap-2">
                         <button
@@ -679,7 +774,7 @@ const supplierCode = getSupplierCode(line);
               {!loading && lines.length === 0 && (
                 <tr>
                   <td
-                    colSpan={11}
+                    colSpan={12}
                     className="px-4 py-10 text-center font-bold text-slate-500"
                   >
                     {supplier
@@ -753,6 +848,20 @@ const supplierCode = getSupplierCode(line);
               {selectedLine.fields.quantity}
             </p>
           </div>
+
+          {isIndiaDispatch(selectedLine) && (
+            <div className="rounded-2xl border-2 border-red-600 bg-red-50 p-4">
+              <p className="text-xs font-black uppercase tracking-wide text-red-600">
+                Dispatch Instruction
+              </p>
+              <p className="mt-1 text-xl font-black uppercase text-red-700">
+                Dispatch to India Address
+              </p>
+              <p className="mt-1 text-sm font-bold text-red-600">
+                City: {getCustomerCity(selectedLine) || "India"}
+              </p>
+            </div>
+          )}
 
           <div>
             <p className="text-xs font-bold text-slate-500">Created Date</p>

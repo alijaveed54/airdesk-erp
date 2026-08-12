@@ -27,6 +27,7 @@ type OrderGroup = {
   instock: number;
   dispatchedBySupplier: number;
   stockOut: number;
+  receivedInUae: number;
 
   items: any[];
 };
@@ -44,6 +45,7 @@ const [storeName, setStoreName] = useState("");
 const [orderNo, setOrderNo] = useState("");
 const [sku, setSku] = useState("");
 const [customerNumber, setCustomerNumber] = useState("");
+const [customerName, setCustomerName] = useState("");
   const [expandedOrders, setExpandedOrders] = useState<string[]>([]);
   const [imageLoadedOrders, setImageLoadedOrders] = useState<string[]>([]);
   const [statusOptions, setStatusOptions] = useState<string[]>([]);
@@ -51,6 +53,66 @@ const [storeOptions, setStoreOptions] = useState<string[]>([]);
 const [isI5qDqBase, setIsI5qDqBase] = useState(false);
 const [selectedBaseName, setSelectedBaseName] = useState("");
 const [orderMode, setOrderMode] = useState("ALL");
+const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
+
+  function isYesValue(value: unknown) {
+    const normalized = String(value ?? "").trim().toLowerCase();
+    return value === true || ["yes", "true", "1", "checked"].includes(normalized);
+  }
+
+  function isStockOutItem(item: any) {
+    const billNo = String(item?.fields?.bill_no || "")
+      .trim()
+      .toLowerCase();
+    return ["stock out", "sold out", "sold"].includes(billNo);
+  }
+
+  function isInstockItem(item: any) {
+    const billNo = String(item?.fields?.bill_no || "").trim();
+    return (
+      isYesValue(item?.fields?.received_in_wh_1) &&
+      !billNo &&
+      !isStockOutItem(item)
+    );
+  }
+
+  function isValidReceivedInUae(item: any) {
+    return (
+      isYesValue(item?.fields?.received_in_uae_2) &&
+      !isStockOutItem(item) &&
+      !isInstockItem(item)
+    );
+  }
+
+  function formatReceivedDate(value: unknown) {
+    const text = String(value ?? "").trim();
+    if (!text) return "-";
+
+    const parsed = new Date(text);
+    if (Number.isNaN(parsed.getTime())) return text;
+
+    return new Intl.DateTimeFormat("en-GB", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    }).format(parsed);
+  }
+
+  function getPendingSuppliers(order: OrderGroup) {
+    return Array.from(
+      new Set(
+        (order.items || [])
+          .filter(
+            (item: any) =>
+              !isStockOutItem(item) &&
+              !isValidReceivedInUae(item) &&
+              !isYesValue(item?.fields?.received_in_wh_1)
+          )
+          .map((item: any) => String(item?.fields?.Supplier || "").trim())
+          .filter(Boolean)
+      )
+    );
+  }
 
   async function loadOrders(overrides?: {
     orderStatus?: string;
@@ -73,6 +135,7 @@ const [orderMode, setOrderMode] = useState("ALL");
     if (orderNo.trim()) params.set("orderNo", orderNo.trim());
 if (sku.trim()) params.set("sku", sku.trim());
 if (customerNumber.trim()) params.set("customerNumber", customerNumber.trim());
+if (customerName.trim()) params.set("customerName", customerName.trim());
 if (dateFrom) params.set("dateFrom", dateFrom);
 if (dateTo) params.set("dateTo", dateTo);
 if (effectiveOrderStatus) params.set("orderStatus", effectiveOrderStatus);
@@ -209,9 +272,16 @@ function toggleImages(orderNo: string) {
 />
 
 <input
+  value={customerName}
+  onChange={(e) => setCustomerName(e.target.value)}
+  placeholder="Customer Name"
+  className="h-11 w-52 rounded-xl border px-4"
+/>
+
+<input
   value={customerNumber}
   onChange={(e) => setCustomerNumber(e.target.value)}
-  placeholder="Customer Number"
+  placeholder="Contact Number"
   className="h-11 w-52 rounded-xl border px-4"
 />
 {isI5qDqBase && (
@@ -272,7 +342,7 @@ function toggleImages(orderNo: string) {
   className="h-11 rounded-xl border px-4"
 />
 <button
-  onClick={loadOrders}
+  onClick={() => loadOrders()}
   disabled={loading}
   className="rounded-xl bg-blue-600 px-5 font-black text-white hover:bg-blue-700 disabled:opacity-50"
 >
@@ -284,6 +354,7 @@ function toggleImages(orderNo: string) {
     setOrderNo("");
     setSku("");
     setCustomerNumber("");
+    setCustomerName("");
     setDateFrom("");
     setDateTo("");
     setOrderStatus("");
@@ -312,7 +383,7 @@ function toggleImages(orderNo: string) {
   Latest 100
 </button>
           <button
-  onClick={loadOrders}
+  onClick={() => loadOrders()}
   disabled={loading}
   className="rounded-xl border border-blue-300 bg-blue-50 px-5 font-black text-blue-700 hover:bg-blue-100 disabled:opacity-50"
 >
@@ -324,6 +395,7 @@ function toggleImages(orderNo: string) {
   setOrderNo("");
   setSku("");
   setCustomerNumber("");
+  setCustomerName("");
 
   setDateFrom("");
   setDateTo("");
@@ -332,7 +404,9 @@ function toggleImages(orderNo: string) {
   setStoreName("");
   setOrderMode("ALL");
 
-  setTimeout(loadOrders, 0);
+  setTimeout(() => {
+  loadOrders();
+}, 0);
 }}  
             className="rounded-xl border px-5 font-black"
           >
@@ -473,8 +547,19 @@ function toggleImages(orderNo: string) {
     Instock : {order.instock}
   </p>
 
+  {!isI5qDqBase && (
+    <p className="font-black text-teal-700">
+      Received in UAE : {order.receivedInUae || 0}
+    </p>
+  )}
+
   <p className="font-black text-red-600">
     Pending : {order.pending}
+    {getPendingSuppliers(order).length > 0 && (
+      <span className="ml-2 text-xs font-bold text-slate-600">
+        — Suppliers: {getPendingSuppliers(order).join(", ")}
+      </span>
+    )}
   </p>
 
 </div>
@@ -502,7 +587,8 @@ function toggleImages(orderNo: string) {
                           <>
                             <th className="px-4 py-3 text-left">Supplier</th>
                             <th className="px-4 py-3 text-center">Qty</th>
-                            <th className="px-4 py-3 text-left">Received WH</th>
+                            <th className="px-4 py-3 text-left">Dispatch From In</th>
+                            <th className="px-4 py-3 text-left">Received Date</th>
                             <th className="px-4 py-3 text-left">Bill No</th>
                           </>
                         )}
@@ -510,14 +596,31 @@ function toggleImages(orderNo: string) {
                     </thead>
                     <tbody>
                       {order.items.map((item:any)=>(
-                        <tr key={item.id} className="border-t hover:bg-blue-50">
+                        <tr
+                          key={item.id}
+                          className={`border-t transition ${
+                            isInstockItem(item)
+                              ? "bg-sky-100 hover:bg-sky-200"
+                              : isValidReceivedInUae(item)
+                                ? "bg-emerald-100 hover:bg-emerald-200"
+                                : "hover:bg-blue-50"
+                          }`}
+                        >
                           <td className="px-4 py-3">
                             {imageLoadedOrders.includes(order.orderNo) ? (
                               item.fields.image?.[0]?.url ? (
-                                <img
-                                  src={item.fields.image[0].url}
-                                  className="h-16 w-12 rounded-lg object-cover"
-                                />
+                                <button
+                                  type="button"
+                                  onClick={() => setEnlargedImage(item.fields.image[0].url)}
+                                  className="block rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                  title="Click to enlarge image"
+                                >
+                                  <img
+                                    src={item.fields.image[0].url}
+                                    alt={item.fields["Item Code"] || "Product image"}
+                                    className="h-16 w-12 cursor-zoom-in rounded-lg object-cover"
+                                  />
+                                </button>
                               ) : (
                                 "-"
                               )
@@ -559,6 +662,11 @@ function toggleImages(orderNo: string) {
                               <td className="px-4 py-3">
                                 {item.fields.received_in_wh_1 || "-"}
                               </td>
+                              <td className="px-4 py-3 font-semibold">
+                                {isValidReceivedInUae(item)
+                                  ? formatReceivedDate(item.fields.received_in_uae_datetime)
+                                  : "-"}
+                              </td>
                               <td className="px-4 py-3">
                                 {item.fields.bill_no || "-"}
                               </td>
@@ -576,6 +684,29 @@ function toggleImages(orderNo: string) {
           ))}
 
       </div>
+
+      {enlargedImage && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4"
+          onClick={() => setEnlargedImage(null)}
+        >
+          <button
+            type="button"
+            onClick={() => setEnlargedImage(null)}
+            className="absolute right-5 top-5 rounded-full bg-white px-4 py-2 text-xl font-black text-slate-900 shadow-lg"
+            aria-label="Close enlarged image"
+          >
+            ×
+          </button>
+
+          <img
+            src={enlargedImage}
+            alt="Enlarged product image"
+            onClick={(e) => e.stopPropagation()}
+            className="max-h-[90vh] max-w-[94vw] rounded-2xl bg-white object-contain shadow-2xl"
+          />
+        </div>
+      )}
 
     </div>
   );

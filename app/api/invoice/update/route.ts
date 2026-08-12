@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
+import { auditedFetch as fetch } from "@/lib/audit-airtable-fetch";
 import {
   airtableHeaders,
   airtableUrl,
   getCurrentAirtableBase,
 } from "@/lib/airtable";
-import { createAuditLog } from "@/lib/audit";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 type AirtableSchemaField = {
   id?: string;
@@ -295,16 +298,6 @@ export async function PATCH(req: NextRequest) {
         { status: response.status }
       );
     }
-
-    await createAuditLog({
-      module: "Invoice",
-      action: "Invoice Update",
-      recordId,
-      recordLabel: data?.fields?.Number
-        ? String(data.fields.Number)
-        : recordId,
-      newValue: JSON.stringify(fields),
-    });
 
     return NextResponse.json({
       success: true,

@@ -76,7 +76,7 @@ export default function DashboardPage() {
       <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <h1 className="text-3xl font-black text-slate-950">
-            Madni Hotel ERP
+            Mysmar AirDesk ERP
           </h1>
           <p className="mt-1 text-sm font-bold text-slate-500">
             Quick access for orders, products, suppliers and reports.

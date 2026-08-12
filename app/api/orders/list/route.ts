@@ -1,4 +1,5 @@
-import { NextResponse } from "next/server";
+﻿import { NextResponse } from "next/server";
+import { getSession } from "@/lib/auth";
 import {
   airtableHeaders,
   airtableUrl,
@@ -35,16 +36,31 @@ type TableConfig = {
   store: string;
   status: string;
   courier: string;
+  courierStatus: string;
   date: string;
   total: string;
   shipping: string;
   discount: string;
+  instock: string;
   currency: "AED" | "QAR";
   source: string;
 };
 
 type Cursor = {
   offsets?: Record<string, string>;
+};
+
+type ReadyProcessStatus =
+  | "green"
+  | "orange";
+
+type ReadyProcessSummary = {
+  status: ReadyProcessStatus;
+  totalItems: number;
+  inStockItems: number;
+  receivedItems: number;
+  soldOutItems: number;
+  pendingItems: number;
 };
 
 const schemaCache = new Map<string, SchemaTable[]>();
@@ -109,6 +125,125 @@ function exactFormula(fieldName: string, value: string) {
   return `LOWER({${fieldName}} & '')=LOWER('${escapeFormulaValue(
     value
   )}')`;
+}
+
+
+function isBSBaseName(baseName: string) {
+  const normalized = String(baseName || "")
+    .trim()
+    .toLowerCase();
+
+  return (
+    normalized.includes("bs order") ||
+    normalized.includes("bs invoice") ||
+    normalized === "bs"
+  );
+}
+
+function normalizedValues(value: unknown) {
+  const values = Array.isArray(value)
+    ? value
+    : [value];
+
+  return values
+    .map((item) => {
+      if (
+        item !== null &&
+        typeof item === "object"
+      ) {
+        const objectValue =
+          item as Record<string, unknown>;
+
+        return String(
+          objectValue.name ??
+            objectValue.value ??
+            objectValue.text ??
+            ""
+        );
+      }
+
+      return String(item ?? "");
+    })
+    .map((item) =>
+      item.trim().toLowerCase()
+    )
+    .filter(Boolean);
+}
+
+function isYesOrCheckedValue(value: unknown) {
+  if (value === true || value === 1) {
+    return true;
+  }
+
+  return normalizedValues(value).some(
+    (item) =>
+      item === "yes" ||
+      item === "true" ||
+      item === "1" ||
+      item === "checked"
+  );
+}
+
+function isInStockValue(value: unknown) {
+  if (value === true || value === 1) {
+    return true;
+  }
+
+  return normalizedValues(value).some(
+    (item) =>
+      item === "yes" ||
+      item === "true" ||
+      item === "1" ||
+      item === "checked" ||
+      item === "in stock" ||
+      item === "instock" ||
+      item === "available"
+  );
+}
+
+function isSoldOutValue(value: unknown) {
+  return normalizedValues(value).some(
+    (item) =>
+      item === "yes" ||
+      item === "true" ||
+      item === "1" ||
+      item.includes("sold out") ||
+      item.includes("stock out")
+  );
+}
+
+function isFullInStockInvoice(
+  record: any,
+  config: TableConfig
+) {
+  const fields = record.fields || {};
+
+  return (
+    text(fields[config.instock])
+      .trim()
+      .toLowerCase() === "full" &&
+    text(fields[config.status])
+      .trim()
+      .toLowerCase() ===
+      "order received"
+  );
+}
+
+function makeRecordIdFormula(
+  recordIds: string[]
+) {
+  const formulas = recordIds.map(
+    (recordId) =>
+      `RECORD_ID()='${escapeFormulaValue(
+        recordId
+      )}'`
+  );
+
+  if (formulas.length === 1) {
+    return formulas[0];
+  }
+
+  return `OR(${formulas.join(",")})`;
 }
 
 function encodeCursor(cursor: Cursor) {
@@ -294,6 +429,11 @@ function makeConfig(
       "Driver",
       "Driver Name",
     ]),
+    courierStatus: findField(fields, [
+      "TFM Status",
+      "Courier Status",
+      "Tracking Status",
+    ]),
     date: findField(fields, [
       "date",
       "Date",
@@ -318,6 +458,12 @@ function makeConfig(
       "discount",
       "Discount",
     ]),
+    instock: findField(fields, [
+      "Instock",
+      "In Stock",
+      "Instock Status",
+      "In Stock Status",
+    ]),
     currency: isQatar ? "QAR" : "AED",
     source:
       table.name === "DQ Invoice"
@@ -326,6 +472,23 @@ function makeConfig(
           ? "i5Q"
           : table.name,
   };
+}
+
+function getChoiceNames(
+  table: SchemaTable,
+  fieldName: string
+) {
+  if (!fieldName) return [];
+
+  const field = table.fields.find(
+    (item) => item.name === fieldName
+  );
+
+  return (
+    field?.options?.choices
+      ?.map((choice) => choice.name.trim())
+      .filter(Boolean) || []
+  );
 }
 
 function makeFilters(
@@ -455,6 +618,659 @@ async function fetchTablePage({
 }
 
 
+async function fetchBSReadyProcessData({
+  airtable,
+  schema,
+  config,
+  searchParams,
+}: {
+  airtable: Awaited<
+    ReturnType<typeof getCurrentAirtableBase>
+  >;
+  schema: SchemaTable[];
+  config: TableConfig;
+  searchParams: URLSearchParams;
+}) {
+  const emptyResult = {
+    priorityRecords: [] as any[],
+    summaries:
+      new Map<string, ReadyProcessSummary>(),
+  };
+
+  if (!config.status) {
+    return emptyResult;
+  }
+
+  const configuredOrderEntryTable =
+    airtable.tables?.orderEntry ||
+    "BS Order Entry";
+
+  const orderEntryTable =
+    schema.find(
+      (table) =>
+        table.name ===
+        configuredOrderEntryTable
+    ) ||
+    schema.find(
+      (table) =>
+        table.name === "BS Order Entry"
+    );
+
+  if (!orderEntryTable) {
+    return emptyResult;
+  }
+
+  const invoiceEntryLink =
+    config.table.fields
+      .filter(
+        (field) =>
+          field.type ===
+            "multipleRecordLinks" &&
+          field.options?.linkedTableId ===
+            orderEntryTable.id &&
+          !field.name
+            .trim()
+            .toLowerCase()
+            .includes("return")
+      )
+      .sort((firstField, secondField) => {
+        const preferredNames = [
+          "sku",
+          "items",
+          "order items",
+          "order entry",
+        ];
+
+        const firstIndex =
+          preferredNames.indexOf(
+            firstField.name
+              .trim()
+              .toLowerCase()
+          );
+
+        const secondIndex =
+          preferredNames.indexOf(
+            secondField.name
+              .trim()
+              .toLowerCase()
+          );
+
+        const firstRank =
+          firstIndex === -1
+            ? preferredNames.length
+            : firstIndex;
+
+        const secondRank =
+          secondIndex === -1
+            ? preferredNames.length
+            : secondIndex;
+
+        return firstRank - secondRank;
+      })[0];
+
+  if (!invoiceEntryLink) {
+    return emptyResult;
+  }
+
+  const invoiceRecords: any[] = [];
+  let invoiceOffset = "";
+
+  const appliedFormula =
+    makeFilters(config, searchParams);
+
+  const orderReceivedFormula =
+    exactFormula(
+      config.status,
+      "Order Received"
+    );
+
+  const invoiceFormula =
+    appliedFormula
+      ? `AND(${orderReceivedFormula},${appliedFormula})`
+      : orderReceivedFormula;
+
+  do {
+    const params = new URLSearchParams({
+      pageSize: "100",
+      filterByFormula:
+        invoiceFormula,
+    });
+
+    if (invoiceOffset) {
+      params.set(
+        "offset",
+        invoiceOffset
+      );
+    }
+
+    if (config.sortField) {
+      params.set(
+        "sort[0][field]",
+        config.sortField
+      );
+      params.set(
+        "sort[0][direction]",
+        "desc"
+      );
+    }
+
+    const response = await fetch(
+      airtableUrl(
+        airtable.baseId,
+        config.tableName,
+        params
+      ),
+      {
+        headers: airtableHeaders(
+          airtable.token
+        ),
+        cache: "no-store",
+      }
+    );
+
+    const data =
+      await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data?.error?.message ||
+          data?.error?.error?.message ||
+          "Unable to load Order Received BS orders"
+      );
+    }
+
+    invoiceRecords.push(
+      ...(data.records || [])
+    );
+
+    invoiceOffset =
+      data.offset || "";
+  } while (invoiceOffset);
+
+  if (invoiceRecords.length === 0) {
+    return emptyResult;
+  }
+
+  const itemIds = Array.from(
+    new Set<string>(
+      invoiceRecords.flatMap(
+        (record) => {
+          const value =
+            record.fields?.[
+              invoiceEntryLink.name
+            ];
+
+          return Array.isArray(value)
+            ? value
+                .map((item) =>
+                  String(item || "").trim()
+                )
+                .filter(Boolean)
+            : [];
+        }
+      )
+    )
+  );
+
+  const entryFields =
+    orderEntryTable.fields || [];
+
+  const fieldMap = {
+    receivedInUae: findField(
+      entryFields,
+      [
+        "Received In UAE",
+        "Received in UAE",
+      ]
+    ),
+    inStock: findField(
+      entryFields,
+      [
+        "instock",
+        "In Stock",
+        "Instock",
+        "InStock",
+      ]
+    ),
+    soldOut: findField(
+      entryFields,
+      ["Sold Out"]
+    ),
+  };
+
+  if (!fieldMap.receivedInUae) {
+    console.warn(
+      "Ready Process skipped: BS Order Entry field 'Received In UAE' not found."
+    );
+
+    return emptyResult;
+  }
+
+  const requestedFields =
+    Array.from(
+      new Set(
+        Object.values(fieldMap).filter(
+          Boolean
+        )
+      )
+    );
+
+  const entryRecordsById =
+    new Map<string, any>();
+
+  for (
+    let index = 0;
+    index < itemIds.length;
+    index += 50
+  ) {
+    const chunk =
+      itemIds.slice(index, index + 50);
+
+    if (chunk.length === 0) {
+      continue;
+    }
+
+    const params =
+      new URLSearchParams({
+        pageSize: "100",
+        filterByFormula:
+          makeRecordIdFormula(chunk),
+      });
+
+    requestedFields.forEach(
+      (fieldName) => {
+        params.append(
+          "fields[]",
+          fieldName
+        );
+      }
+    );
+
+    const response = await fetch(
+      airtableUrl(
+        airtable.baseId,
+        orderEntryTable.name,
+        params
+      ),
+      {
+        headers: airtableHeaders(
+          airtable.token
+        ),
+        cache: "no-store",
+      }
+    );
+
+    const data =
+      await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data?.error?.message ||
+          data?.error?.error?.message ||
+          "Unable to load BS order items for ready processing"
+      );
+    }
+
+    for (
+      const record of data.records || []
+    ) {
+      entryRecordsById.set(
+        record.id,
+        record
+      );
+    }
+  }
+
+  const summaries =
+    new Map<
+      string,
+      ReadyProcessSummary
+    >();
+
+  for (
+    const invoiceRecord of invoiceRecords
+  ) {
+    const linkedItemValue =
+      invoiceRecord.fields?.[
+        invoiceEntryLink.name
+      ];
+
+    const linkedItemIds =
+      Array.isArray(linkedItemValue)
+        ? Array.from(
+            new Set<string>(
+              linkedItemValue
+                .map((item) =>
+                  String(item || "").trim()
+                )
+                .filter(Boolean)
+            )
+          )
+        : [];
+
+    if (linkedItemIds.length === 0) {
+      continue;
+    }
+
+    let inStockItems = 0;
+    let receivedItems = 0;
+    let soldOutItems = 0;
+    let pendingItems = 0;
+
+    for (
+      const itemId of linkedItemIds
+    ) {
+      const itemRecord =
+        entryRecordsById.get(itemId);
+
+      if (!itemRecord) {
+        pendingItems += 1;
+        continue;
+      }
+
+      const fields =
+        itemRecord.fields || {};
+
+      // "Sold Out" is the single source of truth for ready-process formatting.
+      // Supplier Stock Out actions now update this Airtable field directly.
+      const soldOut =
+        isSoldOutValue(
+          fields[fieldMap.soldOut]
+        );
+
+      if (soldOut) {
+        soldOutItems += 1;
+        continue;
+      }
+
+      const inStock =
+        isInStockValue(
+          fields[fieldMap.inStock]
+        );
+
+      if (inStock) {
+        inStockItems += 1;
+        continue;
+      }
+
+      const received =
+        isYesOrCheckedValue(
+          fields[
+            fieldMap.receivedInUae
+          ]
+        );
+
+      if (received) {
+        receivedItems += 1;
+        continue;
+      }
+
+      pendingItems += 1;
+    }
+
+    const totalItems =
+      linkedItemIds.length;
+
+    const deliverableItems =
+      inStockItems +
+      receivedItems;
+
+    let status:
+      | ReadyProcessStatus
+      | "" = "";
+
+    const allItemsReceivedInUae =
+      receivedItems === totalItems;
+
+    const mixedInStockAndReceived =
+      inStockItems > 0 &&
+      receivedItems > 0 &&
+      inStockItems +
+        receivedItems ===
+        totalItems;
+
+    const mixedReadyWithSoldOut =
+      soldOutItems > 0 &&
+      deliverableItems > 0 &&
+      deliverableItems +
+        soldOutItems ===
+        totalItems;
+
+    if (
+      pendingItems === 0 &&
+      soldOutItems === 0 &&
+      (
+        allItemsReceivedInUae ||
+        mixedInStockAndReceived
+      )
+    ) {
+      status = "green";
+    } else if (
+      pendingItems === 0 &&
+      mixedReadyWithSoldOut
+    ) {
+      status = "orange";
+    }
+
+    if (status) {
+      summaries.set(
+        invoiceRecord.id,
+        {
+          status,
+          totalItems,
+          inStockItems,
+          receivedItems,
+          soldOutItems,
+          pendingItems,
+        }
+      );
+    }
+  }
+
+  const priorityRecords =
+    invoiceRecords.filter(
+      (record) =>
+        isFullInStockInvoice(
+          record,
+          config
+        ) ||
+        summaries.has(record.id)
+    );
+
+  return {
+    priorityRecords,
+    summaries,
+  };
+}
+
+
+// BS ITEM BLUE RULE V4
+// Blue formatting is calculated directly from BS Order Entry rows.
+// Rule: every item for the order has Received in WH 1 = Yes and Bill Number is blank.
+function orderNumberKey(value: unknown) {
+  return text(value).trim().toLowerCase();
+}
+
+async function fetchBSItemBlueRules({
+  airtable,
+  schema,
+  config,
+  invoiceRecords,
+}: {
+  airtable: Awaited<
+    ReturnType<typeof getCurrentAirtableBase>
+  >;
+  schema: SchemaTable[];
+  config: TableConfig;
+  invoiceRecords: any[];
+}) {
+  const rules = new Map<string, boolean>();
+
+  const configuredOrderEntryTable =
+    airtable.tables?.orderEntry || "BS Order Entry";
+
+  const orderEntryTable =
+    schema.find(
+      (table) => table.name === configuredOrderEntryTable
+    ) ||
+    schema.find(
+      (table) => table.name === "BS Order Entry"
+    );
+
+  if (!orderEntryTable) return rules;
+
+  const entryFields = orderEntryTable.fields || [];
+  const orderNoField = findField(entryFields, [
+    "Order Number",
+    "Order No.",
+    "Order No",
+    "order no.",
+    "order no",
+    "order_no",
+    "Invoice No",
+  ]);
+  const receivedWhField = findField(entryFields, [
+    "received_in_wh_1",
+    "Received in WH 1",
+    "Received In WH 1",
+    "Received WH 1",
+    "Warehouse Received",
+  ]);
+  const billNoField = findField(entryFields, [
+    "bill_no",
+    "Bill No",
+    "Bill No.",
+    "Bill Number",
+  ]);
+
+  if (!orderNoField || !receivedWhField || !billNoField) {
+    console.warn("BS item blue rule skipped because a required Order Entry field is missing", {
+      orderEntryTable: orderEntryTable.name,
+      orderNoField,
+      receivedWhField,
+      billNoField,
+    });
+    return rules;
+  }
+
+  const orderNumbers = Array.from(
+    new Set(
+      invoiceRecords
+        .map((record) =>
+          text(record.fields?.[config.orderNo]).trim()
+        )
+        .filter(Boolean)
+    )
+  );
+
+  const trackedKeys = new Set(
+    orderNumbers.map((orderNumber) =>
+      orderNumberKey(orderNumber)
+    )
+  );
+
+  for (const orderNumber of orderNumbers) {
+    rules.set(orderNumberKey(orderNumber), false);
+  }
+
+  const counts = new Map<
+    string,
+    { total: number; qualified: number }
+  >();
+
+  for (let start = 0; start < orderNumbers.length; start += 20) {
+    const batch = orderNumbers.slice(start, start + 20);
+    const formulas = batch.map((orderNumber) =>
+      exactFormula(orderNoField, orderNumber)
+    );
+    const filterByFormula =
+      formulas.length === 1
+        ? formulas[0]
+        : `OR(${formulas.join(",")})`;
+
+    let offset = "";
+
+    do {
+      const params = new URLSearchParams({
+        pageSize: "100",
+        filterByFormula,
+      });
+
+      params.append("fields[]", orderNoField);
+      params.append("fields[]", receivedWhField);
+      params.append("fields[]", billNoField);
+
+      if (offset) params.set("offset", offset);
+
+      const response = await fetch(
+        airtableUrl(
+          airtable.baseId,
+          orderEntryTable.name,
+          params
+        ),
+        {
+          headers: airtableHeaders(airtable.token),
+          cache: "no-store",
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data?.error?.message ||
+            data?.error?.error?.message ||
+            "Unable to evaluate BS Order Entry blue rule"
+        );
+      }
+
+      for (const record of data.records || []) {
+        const fields = record.fields || {};
+        const key = orderNumberKey(fields[orderNoField]);
+
+        if (!key || !trackedKeys.has(key)) continue;
+
+        const current = counts.get(key) || {
+          total: 0,
+          qualified: 0,
+        };
+
+        current.total += 1;
+
+        const receivedWh = isYesOrCheckedValue(
+          fields[receivedWhField]
+        );
+        const billNumberIsBlank =
+          text(fields[billNoField]).trim() === "";
+
+        if (receivedWh && billNumberIsBlank) {
+          current.qualified += 1;
+        }
+
+        counts.set(key, current);
+      }
+
+      offset = data.offset || "";
+    } while (offset);
+  }
+
+  for (const orderNumber of orderNumbers) {
+    const key = orderNumberKey(orderNumber);
+    const count = counts.get(key);
+
+    rules.set(
+      key,
+      Boolean(
+        count &&
+          count.total > 0 &&
+          count.qualified === count.total
+      )
+    );
+  }
+
+  return rules;
+}
+
 async function resolveCustomerRecords({
   airtable,
   schema,
@@ -583,7 +1399,9 @@ function normalizeRecord(
   customerValues: Map<
     string,
     { name: string; phone: string }
-  >
+  >,
+  readySummary?: ReadyProcessSummary,
+  itemBasedBlueRule?: boolean
 ) {
   const sourceFields = record.fields || {};
   const orderNo = text(sourceFields[config.orderNo]);
@@ -631,17 +1449,47 @@ function normalizeRecord(
       order_status:
         text(sourceFields[config.status]) || "",
       Courier: text(sourceFields[config.courier]) || "",
+      __courierStatus:
+        text(sourceFields[config.courierStatus]) || "",
       date: text(sourceFields[config.date]) || "",
       total_order_value: number(
         sourceFields[config.total]
       ),
       shipping: number(sourceFields[config.shipping]),
       discount: number(sourceFields[config.discount]),
+      Instock: text(sourceFields[config.instock]) || "",
+      __allItemsWhYesBillBlank:
+        itemBasedBlueRule,
       __currency: config.currency,
       __source: config.source,
       __tableName: config.tableName,
       __canUpdateStatus: Boolean(config.status),
       __canUpdateCourier: Boolean(config.courier),
+      __statusOptions: getChoiceNames(
+        config.table,
+        config.status
+      ),
+      __courierOptions: getChoiceNames(
+        config.table,
+        config.courier
+      ),
+      __readyProcessStatus:
+        readySummary?.status || "",
+      __readyProcessCounts:
+        readySummary
+          ? {
+              totalItems:
+                readySummary.totalItems,
+              inStockItems:
+                readySummary.inStockItems,
+              receivedItems:
+                readySummary.receivedItems,
+              soldOutItems:
+                readySummary.soldOutItems,
+              pendingItems:
+                readySummary.pendingItems,
+            }
+          : null,
     },
   };
 }
@@ -744,6 +1592,75 @@ export async function GET(request: Request) {
       )
     );
 
+    const isBSBase =
+      isBSBaseName(
+        airtable.baseName
+      );
+
+    let readyProcessSummaries =
+      new Map<
+        string,
+        ReadyProcessSummary
+      >();
+
+    if (
+      isBSBase &&
+      configs.length === 1
+    ) {
+      const readyProcessData =
+        await fetchBSReadyProcessData({
+          airtable,
+          schema,
+          config: configs[0],
+          searchParams,
+        });
+
+      readyProcessSummaries =
+        readyProcessData.summaries;
+
+      if (
+        readyProcessData
+          .priorityRecords.length > 0
+      ) {
+        const priorityIds =
+          new Set(
+            readyProcessData
+              .priorityRecords
+              .map(
+                (record: any) =>
+                  record.id
+              )
+          );
+
+        pages[0].records = [
+          ...readyProcessData
+            .priorityRecords,
+          ...pages[0].records.filter(
+            (record: any) =>
+              !priorityIds.has(
+                record.id
+              )
+          ),
+        ];
+      }
+    }
+
+    let bsItemBlueRules =
+      new Map<string, boolean>();
+
+    if (
+      isBSBase &&
+      configs.length === 1
+    ) {
+      bsItemBlueRules =
+        await fetchBSItemBlueRules({
+          airtable,
+          schema,
+          config: configs[0],
+          invoiceRecords: pages[0].records,
+        });
+    }
+
     const customerValues =
       await resolveCustomerRecords({
         airtable,
@@ -758,11 +1675,87 @@ export async function GET(request: Request) {
           normalizeRecord(
             record,
             config,
-            customerValues
+            customerValues,
+            readyProcessSummaries.get(
+              record.id
+            ),
+            bsItemBlueRules.get(
+              orderNumberKey(
+                record.fields?.[config.orderNo]
+              )
+            )
           )
         )
       )
       .sort((a, b) => {
+        if (isBSBase) {
+          const getPriority = (
+            record: any
+          ) => {
+            const orderStatus =
+              String(
+                record.fields
+                  .order_status || ""
+              )
+                .trim()
+                .toLowerCase();
+
+            if (
+              orderStatus !==
+              "order received"
+            ) {
+              return 3;
+            }
+
+            const inStockStatus =
+              String(
+                record.fields
+                  .Instock || ""
+              )
+                .trim()
+                .toLowerCase();
+
+            if (
+              inStockStatus === "full"
+            ) {
+              return 0;
+            }
+
+            const readyStatus =
+              String(
+                record.fields
+                  .__readyProcessStatus ||
+                  ""
+              )
+                .trim()
+                .toLowerCase();
+
+            if (
+              readyStatus === "green"
+            ) {
+              return 1;
+            }
+
+            if (
+              readyStatus === "orange"
+            ) {
+              return 2;
+            }
+
+            return 3;
+          };
+
+          const priorityDifference =
+            getPriority(a) -
+            getPriority(b);
+
+          if (
+            priorityDifference !== 0
+          ) {
+            return priorityDifference;
+          }
+        }
+
         const numberDifference =
           Number(b.fields.Number || 0) -
           Number(a.fields.Number || 0);
@@ -846,3 +1839,612 @@ export async function GET(request: Request) {
     return handleApiError(error, "Orders list failed");
   }
 }
+
+type InlineUpdateBody = {
+  orderId?: unknown;
+  tableName?: unknown;
+  status?: unknown;
+  courier?: unknown;
+};
+
+function getAllowedInvoiceTableNames(
+  schema: SchemaTable[],
+  configuredInvoice: string
+) {
+  const hasI5qDqTables =
+    schema.some((table) => table.name === "DQ Invoice") &&
+    schema.some((table) => table.name === "i5Q Invoice");
+
+  if (hasI5qDqTables) {
+    return ["DQ Invoice", "i5Q Invoice"];
+  }
+
+  if (
+    configuredInvoice &&
+    schema.some(
+      (table) => table.name === configuredInvoice
+    )
+  ) {
+    return [configuredInvoice];
+  }
+
+  const detected = schema.find((table) =>
+    ["BS Invoice", "FAB Invoice", "Invoice"].includes(
+      table.name
+    )
+  );
+
+  return detected ? [detected.name] : [];
+}
+
+function getAccessDetails(value: unknown) {
+  const access = (value || {}) as {
+    canEdit?: boolean;
+    canUpdate?: boolean;
+    role?: string;
+    userRole?: string;
+    user?: { role?: string };
+    permissions?: {
+      canEdit?: boolean;
+      canUpdate?: boolean;
+    };
+  };
+
+  const role = String(
+    access.user?.role ||
+      access.role ||
+      access.userRole ||
+      ""
+  )
+    .trim()
+    .toLowerCase();
+
+  const canEdit =
+    access.canEdit ??
+    access.canUpdate ??
+    access.permissions?.canEdit ??
+    access.permissions?.canUpdate;
+
+  return {
+    role,
+    canEdit,
+  };
+}
+
+function getWritableValue(
+  field: SchemaField,
+  rawValue: unknown,
+  label: string
+) {
+  const readonlyTypes = new Set([
+    "formula",
+    "rollup",
+    "count",
+    "multipleLookupValues",
+    "createdTime",
+    "lastModifiedTime",
+    "autoNumber",
+    "button",
+  ]);
+
+  if (readonlyTypes.has(field.type)) {
+    throw new Error(`${label} field is not editable`);
+  }
+
+  const value = String(rawValue ?? "").trim();
+
+  if (field.type === "singleSelect" && value) {
+    const choices =
+      field.options?.choices?.map((choice) => choice.name) ||
+      [];
+
+    if (choices.length > 0) {
+      const canonicalChoice = choices.find(
+        (choice) =>
+          choice.trim().toLowerCase() ===
+          value.toLowerCase()
+      );
+
+      if (!canonicalChoice) {
+        throw new Error(
+          `${label} value is not available in Airtable`
+        );
+      }
+
+      return canonicalChoice;
+    }
+  }
+
+  return value || null;
+}
+
+export async function PATCH(request: Request) {
+  try {
+    const airtable = await getCurrentAirtableBase();
+
+    if (!airtable.canView) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            "You do not have permission to update orders",
+        },
+        { status: 403 }
+      );
+    }
+
+    const access = getAccessDetails(airtable);
+
+    if (
+      access.role === "supplier" ||
+      access.canEdit === false
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            "You do not have permission to update orders",
+        },
+        { status: 403 }
+      );
+    }
+
+    const body = (await request.json()) as InlineUpdateBody;
+    const orderId = String(body.orderId || "").trim();
+    const tableName = String(body.tableName || "").trim();
+
+    if (!orderId || !orderId.startsWith("rec")) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Valid Airtable order ID is required",
+        },
+        { status: 400 }
+      );
+    }
+
+    if (!tableName) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Source invoice table is required",
+        },
+        { status: 400 }
+      );
+    }
+
+    const hasStatus = Object.prototype.hasOwnProperty.call(
+      body,
+      "status"
+    );
+    const hasCourier = Object.prototype.hasOwnProperty.call(
+      body,
+      "courier"
+    );
+
+    if (!hasStatus && !hasCourier) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "No inline changes were provided",
+        },
+        { status: 400 }
+      );
+    }
+
+    const schema = await getSchema(
+      airtable.baseId,
+      airtable.token
+    );
+
+    const allowedTableNames = getAllowedInvoiceTableNames(
+      schema,
+      airtable.tables?.invoice || ""
+    );
+
+    if (!allowedTableNames.includes(tableName)) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            "This invoice table is not available in the selected base",
+        },
+        { status: 400 }
+      );
+    }
+
+    const table = schema.find(
+      (item) => item.name === tableName
+    );
+
+    if (!table) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Invoice table was not found",
+        },
+        { status: 404 }
+      );
+    }
+
+    const config = makeConfig(
+      table,
+      airtable.baseName,
+      schema
+    );
+
+    const fields: Record<string, string | null> = {};
+    const updated: {
+      status?: string;
+      courier?: string;
+    } = {};
+
+    if (hasStatus) {
+      if (!config.status) {
+        return NextResponse.json(
+          {
+            success: false,
+            message:
+              "Order Status is not available in this base",
+          },
+          { status: 400 }
+        );
+      }
+
+      const statusField = table.fields.find(
+        (field) => field.name === config.status
+      );
+
+      if (!statusField) {
+        throw new Error("Order Status field was not found");
+      }
+
+      const value = getWritableValue(
+        statusField,
+        body.status,
+        "Order Status"
+      );
+
+      fields[config.status] = value;
+      updated.status = value || "";
+    }
+
+    if (hasCourier) {
+      if (!config.courier) {
+        return NextResponse.json(
+          {
+            success: false,
+            message:
+              "Courier is not available in this base",
+          },
+          { status: 400 }
+        );
+      }
+
+      const courierField = table.fields.find(
+        (field) => field.name === config.courier
+      );
+
+      if (!courierField) {
+        throw new Error("Courier field was not found");
+      }
+
+      const value = getWritableValue(
+        courierField,
+        body.courier,
+        "Courier"
+      );
+
+      fields[config.courier] = value;
+      updated.courier = value || "";
+    }
+
+    const response = await fetch(
+      `https://api.airtable.com/v0/${encodeURIComponent(
+        airtable.baseId
+      )}/${encodeURIComponent(
+        tableName
+      )}/${encodeURIComponent(orderId)}`,
+      {
+        method: "PATCH",
+        headers: {
+          ...airtableHeaders(airtable.token),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          fields,
+          typecast: false,
+        }),
+        cache: "no-store",
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data?.error?.message ||
+          data?.error?.error?.message ||
+          "Airtable inline update failed"
+      );
+    }
+
+    return NextResponse.json({
+      success: true,
+      orderId,
+      tableName,
+      updated,
+    });
+  } catch (error) {
+    return handleApiError(
+      error,
+      "Order inline update failed"
+    );
+  }
+}
+// ADMIN_ORDER_DELETE_V1: The browser button is hidden for non-admin users,
+// and this server-side check prevents direct DELETE requests by non-admins.
+type AdminDeleteBody = {
+  orderId?: unknown;
+  tableName?: unknown;
+};
+
+async function adminDeleteLinkedRecords({
+  baseId,
+  token,
+  tableName,
+  recordIds,
+}: {
+  baseId: string;
+  token: string;
+  tableName: string;
+  recordIds: string[];
+}) {
+  let deleted = 0;
+
+  for (let index = 0; index < recordIds.length; index += 10) {
+    const batch = recordIds.slice(index, index + 10);
+    const params = new URLSearchParams();
+
+    batch.forEach((recordId) => {
+      params.append("records[]", recordId);
+    });
+
+    const response = await fetch(
+      airtableUrl(baseId, tableName, params),
+      {
+        method: "DELETE",
+        headers: airtableHeaders(token),
+        cache: "no-store",
+      }
+    );
+
+    const data = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      throw {
+        status: response.status,
+        message:
+          data?.error?.message ||
+          data?.error?.error?.message ||
+          `Unable to delete linked order items from ${tableName}`,
+        error: data,
+      };
+    }
+
+    deleted += Array.isArray(data?.records)
+      ? data.records.length
+      : batch.length;
+  }
+
+  return deleted;
+}
+
+export async function DELETE(request: Request) {
+  try {
+    const session = (await getSession()) as
+      | {
+          role?: string;
+          superAdmin?: boolean;
+        }
+      | null;
+
+    if (!session) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Not authenticated",
+        },
+        { status: 401 }
+      );
+    }
+
+    const role = String(session.role || "")
+      .trim()
+      .toLowerCase();
+
+    if (role !== "admin" && !session.superAdmin) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Only Admin can delete orders",
+        },
+        { status: 403 }
+      );
+    }
+
+    const airtable = await getCurrentAirtableBase();
+    const body = (await request.json().catch(() => ({}))) as AdminDeleteBody;
+    const orderId = String(body.orderId || "").trim();
+    const tableName = String(body.tableName || "").trim();
+
+    if (!orderId.startsWith("rec")) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Valid Airtable order ID is required",
+        },
+        { status: 400 }
+      );
+    }
+
+    if (!tableName) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Source invoice table is required",
+        },
+        { status: 400 }
+      );
+    }
+
+    const schema = await getSchema(
+      airtable.baseId,
+      airtable.token
+    );
+    const allowedTableNames = getAllowedInvoiceTableNames(
+      schema,
+      airtable.tables?.invoice || ""
+    );
+
+    if (!allowedTableNames.includes(tableName)) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "This invoice table is not available in the selected base",
+        },
+        { status: 400 }
+      );
+    }
+
+    const invoiceTable = schema.find(
+      (table) => table.name === tableName
+    );
+
+    if (!invoiceTable) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Invoice table was not found",
+        },
+        { status: 404 }
+      );
+    }
+
+    const invoiceResponse = await fetch(
+      `${airtableUrl(
+        airtable.baseId,
+        tableName
+      )}/${encodeURIComponent(orderId)}`,
+      {
+        headers: airtableHeaders(airtable.token),
+        cache: "no-store",
+      }
+    );
+    const invoiceRecord = await invoiceResponse
+      .json()
+      .catch(() => null);
+
+    if (!invoiceResponse.ok) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            invoiceRecord?.error?.message ||
+            invoiceRecord?.error?.error?.message ||
+            "Order was not found",
+          error: invoiceRecord,
+        },
+        { status: invoiceResponse.status }
+      );
+    }
+
+    const linkedGroups = new Map<string, Set<string>>();
+
+    for (const field of invoiceTable.fields || []) {
+      if (
+        field.type !== "multipleRecordLinks" ||
+        !field.options?.linkedTableId
+      ) {
+        continue;
+      }
+
+      const linkedTable = schema.find(
+        (table) => table.id === field.options?.linkedTableId
+      );
+      const linkedTableName = String(linkedTable?.name || "");
+      const normalizedLinkedName = linkedTableName
+        .trim()
+        .toLowerCase();
+
+      if (
+        !normalizedLinkedName.includes("order entry") ||
+        normalizedLinkedName.includes("return")
+      ) {
+        continue;
+      }
+
+      const value = invoiceRecord?.fields?.[field.name];
+      const recordIds = Array.isArray(value)
+        ? value
+            .map((item: unknown) => String(item || "").trim())
+            .filter((item: string) => item.startsWith("rec"))
+        : [];
+
+      if (recordIds.length === 0) continue;
+
+      const existing =
+        linkedGroups.get(linkedTableName) || new Set<string>();
+      recordIds.forEach((recordId: string) => existing.add(recordId));
+      linkedGroups.set(linkedTableName, existing);
+    }
+
+    let deletedItemCount = 0;
+
+    for (const [linkedTableName, recordIds] of linkedGroups.entries()) {
+      deletedItemCount += await adminDeleteLinkedRecords({
+        baseId: airtable.baseId,
+        token: airtable.token,
+        tableName: linkedTableName,
+        recordIds: Array.from(recordIds),
+      });
+    }
+
+    const deleteInvoiceResponse = await fetch(
+      `${airtableUrl(
+        airtable.baseId,
+        tableName
+      )}/${encodeURIComponent(orderId)}`,
+      {
+        method: "DELETE",
+        headers: airtableHeaders(airtable.token),
+        cache: "no-store",
+      }
+    );
+    const deleteInvoiceData = await deleteInvoiceResponse
+      .json()
+      .catch(() => null);
+
+    if (!deleteInvoiceResponse.ok) {
+      throw {
+        status: deleteInvoiceResponse.status,
+        message:
+          deleteInvoiceData?.error?.message ||
+          deleteInvoiceData?.error?.error?.message ||
+          "Order invoice delete failed",
+        error: deleteInvoiceData,
+      };
+    }
+
+    return NextResponse.json({
+      success: true,
+      orderId,
+      tableName,
+      deletedItemCount,
+      deletedInvoice: true,
+    });
+  } catch (error) {
+    return handleApiError(error, "Order delete failed");
+  }
+}
+

@@ -76,6 +76,43 @@ function numberValue(value: any) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function buildBsOrderNumber({
+  store,
+  number,
+  resend,
+}: {
+  store: unknown;
+  number: unknown;
+  resend: unknown;
+}) {
+  const storeName = String(firstValue(store) || "").trim();
+  const rawNumber = String(firstValue(number) || "").trim();
+  const resendValue = String(firstValue(resend) || "").trim();
+
+  if (!rawNumber) return "";
+
+  const prefixByStore: Record<string, string> = {
+    "bestshop.ae": "BBS",
+    "fab ethnic uae": "BFEU",
+    rushnas: "BSH",
+    ethnofash: "BEF",
+    "clarance store": "BCLR",
+    "sooper deals": "BSD",
+    "u5store.com": "BUS",
+    ef: "BEF",
+    "rushna boutique": "BSM",
+    "fab uae": "BFAB",
+    styleshop: "BSS",
+    desiluxe: "BDL",
+    "test store": "BTS",
+  };
+
+  const prefix = prefixByStore[normalize(storeName)] || "";
+  const baseOrderNo = `${prefix}${rawNumber}`;
+
+  return resendValue ? `${baseOrderNo}${resendValue}` : baseOrderNo;
+}
+
 function getFieldName(fields: SchemaField[], candidates: string[]) {
   const map = new Map(
     fields.map((field) => [normalize(field.name), field.name])
@@ -249,6 +286,7 @@ function emptySummary() {
   return {
     totalParcels: 0,
     totalValue: 0,
+    value: 0,
     delivered: 0,
     deliveredValue: 0,
     dispatched: 0,
@@ -302,9 +340,7 @@ export async function GET(request: Request) {
       Boolean(session.superAdmin);
 
     const selectedBaseId =
-      session.selectedBase?.baseId ||
-      session.selectedBaseId ||
-      "";
+      session.selectedBase?.baseId || "";
 
     const selectedBase =
       allowedBases.find((base) => base.baseId === selectedBaseId) ||
@@ -378,10 +414,24 @@ export async function GET(request: Request) {
         ]);
 
         const orderNoField = getFieldName(fields, [
+          "order_no",
+          "Order Number",
           "Order No.",
           "Order No",
-          "Number",
           "Invoice No.",
+          "Number",
+        ]);
+
+        const numberField = getFieldName(fields, [
+          "Number",
+          "Autonumber",
+          "Auto Number",
+        ]);
+
+        const resendField = getFieldName(fields, [
+          "Resend",
+          "Re-send",
+          "Re Send",
         ]);
 
         const customerField = getFieldName(fields, [
@@ -416,6 +466,8 @@ export async function GET(request: Request) {
             storeField,
             valueField,
             orderNoField,
+            numberField,
+            resendField,
             customerField,
             phoneField,
           ].filter(Boolean),
@@ -438,6 +490,26 @@ export async function GET(request: Request) {
           const storeName = storeField
             ? String(firstValue(recordFields[storeField]) || "")
             : "";
+
+          const isBsOrderBase =
+            baseName.includes("bs") &&
+            !baseName.includes("fab") &&
+            !baseName.includes("tat") &&
+            !baseName.includes("dq") &&
+            !baseName.includes("i5q");
+
+          const resolvedOrderNo = isBsOrderBase
+            ? buildBsOrderNumber({
+                store: storeField ? recordFields[storeField] : "",
+                number: numberField ? recordFields[numberField] : "",
+                resend: resendField ? recordFields[resendField] : "",
+              }) ||
+              (orderNoField
+                ? String(firstValue(recordFields[orderNoField]) || "")
+                : "")
+            : orderNoField
+              ? String(firstValue(recordFields[orderNoField]) || "")
+              : "";
 
           if (
             courierFilter &&
@@ -468,9 +540,7 @@ export async function GET(request: Request) {
           ) {
             oldOrders.push({
               id: record.id,
-              orderNo: orderNoField
-                ? String(firstValue(recordFields[orderNoField]) || "")
-                : "",
+              orderNo: resolvedOrderNo,
               store: storeName,
               customer: customerField
                 ? String(firstValue(recordFields[customerField]) || "")

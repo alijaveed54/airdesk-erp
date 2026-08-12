@@ -1,0 +1,2875 @@
+"use client";
+
+// TFM_BULK_LABEL_PRINT_V4
+// TFM_TRACK_BY_SHIPPER_REFERENCE_V1
+
+import Link from "next/link";
+import {
+  AlertTriangle,
+  Ban,
+  CheckCircle2,
+  CircleHelp,
+  ClipboardCopy,
+  Clock3,
+  Download,
+  FileSpreadsheet,
+  KeyRound,
+  Loader2,
+  PackageCheck,
+  Pause,
+  Play,
+  Printer,
+  Radio,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  Send,
+  ShieldCheck,
+  Truck,
+  XCircle,
+} from "lucide-react";
+import {
+  type ChangeEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+
+type ValidationIssue = {
+  field: string;
+  message: string;
+  severity: "error" | "warning";
+};
+
+type TfmStatusGroup =
+  | "Created"
+  | "In Transit"
+  | "Out for Delivery"
+  | "On Hold"
+  | "Delivered"
+  | "Returned"
+  | "Cancelled"
+  | "Unknown";
+
+type TfmOrder = {
+  recordId: string;
+  orderNo: string;
+  orderStatus: string;
+  courier: string;
+  customerName: string;
+  phone: string;
+  address: string;
+  city: string;
+  area: string;
+  building: string;
+  street: string;
+  store: string;
+  note: string;
+  pieces: number;
+  total: number;
+  advance: number;
+  codAmount: number;
+  paymentType: "COD" | "Prepaid";
+  awbNumber: string;
+  previousAwbNumbers: string[];
+  shipmentId: string;
+  tfmStatus: string;
+  statusGroup: TfmStatusGroup;
+  bookingDate: string;
+  lastActionDate: string;
+  lastSync: string;
+  tfmLocation: string;
+  tfmExpectedDelivery: string;
+  codStatus: string;
+  codReceiveDate: string;
+  codReceived: boolean;
+  daysSinceLastAction: number | null;
+  stale: boolean;
+  alreadyBooked: boolean;
+  canCreateNewAwb: boolean;
+  valid: boolean;
+  issues: ValidationIssue[];
+};
+
+type StatusCounts = Record<TfmStatusGroup, number>;
+
+type OrdersResponse = {
+  success: boolean;
+  message?: string;
+  base?: {
+    baseId: string;
+    baseName: string;
+    invoiceTable: string;
+  };
+  summary?: {
+    total: number;
+    valid: number;
+    invalid: number;
+    alreadyBooked: number;
+    stale: number;
+    codPending: number;
+    codReceived: number;
+    statusCounts: StatusCounts;
+  };
+  orders?: TfmOrder[];
+};
+
+type ConfigResponse = {
+  success: boolean;
+  message?: string;
+  supported?: boolean;
+  canTestAuthentication?: boolean;
+  selectedBase?: {
+    baseId: string;
+    baseName: string;
+    configuredInvoiceTable: string;
+  };
+  configuration?: {
+    apiBaseUrlConfigured: boolean;
+    apiBaseUrl: string;
+    authPathConfigured: boolean;
+    authPath: string;
+    usernameConfigured: boolean;
+    passwordConfigured: boolean;
+    credentialsConfigured: boolean;
+    authenticationReady: boolean;
+    liveRequestsAllowed: boolean;
+    createShipmentPathConfigured: boolean;
+    createShipmentTemplateConfigured: boolean;
+    trackShipmentPathConfigured: boolean;
+    trackShipmentTemplateConfigured: boolean;
+    cancelShipmentPathConfigured: boolean;
+    cancelShipmentTemplateConfigured: boolean;
+    labelPathConfigured: boolean;
+    labelTemplateConfigured: boolean;
+    bookingReady: boolean;
+    trackingReady: boolean;
+    cancellationReady: boolean;
+    labelReady: boolean;
+    environment: "sandbox" | "production";
+  };
+};
+
+type AuthTestResponse = {
+  success: boolean;
+  message?: string;
+  authentication?: {
+    userId: string;
+    shipperId: string;
+    tokenType: string;
+    expiresAt: string;
+  };
+};
+
+type ShipmentAction = "create" | "track" | "cancel" | "label";
+
+type ShipmentActionResponse = {
+  success: boolean;
+  partial?: boolean;
+  message?: string;
+  successful?: number;
+  failed?: number;
+  results?: Array<{
+    recordId: string;
+    orderNo: string;
+    success: boolean;
+    awbNumber?: string;
+    shipmentId?: string;
+    status?: string;
+    lastActionDate?: string;
+    location?: string;
+    expectedDelivery?: string;
+    orderStatus?: string;
+    codReceived?: boolean;
+    codReceivedAt?: string;
+    message: string;
+  }>;
+};
+
+type BulkBatchStatus =
+  | "running"
+  | "paused"
+  | "completed"
+  | "cancelled";
+
+type BulkBatchResult =
+  NonNullable<ShipmentActionResponse["results"]>[number] & {
+    outcome: "created" | "failed" | "skipped";
+    processedAt: string;
+  };
+
+type BulkBatchState = {
+  id: string;
+  status: BulkBatchStatus;
+  batchSize: number;
+  total: number;
+  processed: number;
+  successful: number;
+  failed: number;
+  skipped: number;
+  pendingRecordIds: string[];
+  results: BulkBatchResult[];
+  startedAt: string;
+  updatedAt: string;
+  environment: "sandbox" | "production";
+};
+
+type LiveTrackingSyncState = {
+  running: boolean;
+  total: number;
+  processed: number;
+  successful: number;
+  failed: number;
+  startedAt: string;
+  updatedAt: string;
+};
+
+const LIVE_TRACKING_CHUNK_SIZE = 10;
+const AUTO_LIVE_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+
+const BULK_BATCH_STORAGE_KEY =
+  "mysmar-tfm-bulk-batch-v1";
+const DEFAULT_BULK_BATCH_SIZE = 10;
+
+type Filter =
+  | "all"
+  | "ready"
+  | "invalid"
+  | "existing_awb"
+  | "stale"
+  | "created"
+  | "in_transit"
+  | "out_for_delivery"
+  | "on_hold"
+  | "delivered"
+  | "returned"
+  | "cancelled"
+  | "unknown";
+
+const EMPTY_STATUS_COUNTS: StatusCounts = {
+  Created: 0,
+  "In Transit": 0,
+  "Out for Delivery": 0,
+  "On Hold": 0,
+  Delivered: 0,
+  Returned: 0,
+  Cancelled: 0,
+  Unknown: 0,
+};
+
+function money(value: number) {
+  return new Intl.NumberFormat("en-AE", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value || 0);
+}
+
+function formatDate(value: string) {
+  if (!value) return "—";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function csvCell(value: unknown) {
+  const text = String(value ?? "").replace(/"/g, '""');
+  return `"${text}"`;
+}
+
+function statusFilterValue(status: TfmStatusGroup): Filter {
+  switch (status) {
+    case "Created":
+      return "created";
+    case "In Transit":
+      return "in_transit";
+    case "Out for Delivery":
+      return "out_for_delivery";
+    case "On Hold":
+      return "on_hold";
+    case "Delivered":
+      return "delivered";
+    case "Returned":
+      return "returned";
+    case "Cancelled":
+      return "cancelled";
+    default:
+      return "unknown";
+  }
+}
+
+function statusBadgeClass(status: TfmStatusGroup) {
+  switch (status) {
+    case "Created":
+      return "border-slate-200 bg-slate-50 text-slate-700";
+    case "In Transit":
+      return "border-blue-200 bg-blue-50 text-blue-700";
+    case "Out for Delivery":
+      return "border-violet-200 bg-violet-50 text-violet-700";
+    case "On Hold":
+      return "border-amber-200 bg-amber-50 text-amber-700";
+    case "Delivered":
+      return "border-emerald-200 bg-emerald-50 text-emerald-700";
+    case "Returned":
+      return "border-orange-200 bg-orange-50 text-orange-700";
+    case "Cancelled":
+      return "border-red-200 bg-red-50 text-red-700";
+    default:
+      return "border-amber-200 bg-amber-50 text-amber-700";
+  }
+}
+
+function statusIcon(status: TfmStatusGroup) {
+  switch (status) {
+    case "Delivered":
+      return CheckCircle2;
+    case "Returned":
+      return RotateCcw;
+    case "Cancelled":
+      return Ban;
+    case "Unknown":
+      return CircleHelp;
+    default:
+      return Truck;
+  }
+}
+
+export default function TfmStatusDashboardPage() {
+  const [orders, setOrders] = useState<TfmOrder[]>([]);
+  const [config, setConfig] = useState<ConfigResponse | null>(
+    null,
+  );
+  const [base, setBase] =
+    useState<OrdersResponse["base"]>();
+  const [summary, setSummary] =
+    useState<OrdersResponse["summary"]>();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState<Filter>("all");
+  const [selected, setSelected] = useState<string[]>([]);
+  const [copied, setCopied] = useState(false);
+  const [authTesting, setAuthTesting] = useState(false);
+  const [authResult, setAuthResult] =
+    useState<AuthTestResponse["authentication"]>();
+  const [authError, setAuthError] = useState("");
+  const [actionBusy, setActionBusy] = useState("");
+  const [actionMessage, setActionMessage] = useState("");
+  const [actionError, setActionError] = useState("");
+  const [actionFailures, setActionFailures] = useState<
+    NonNullable<ShipmentActionResponse["results"]>
+  >([]);
+  const [bulkBatchSize, setBulkBatchSize] =
+    useState(DEFAULT_BULK_BATCH_SIZE);
+  const [bulkBatch, setBulkBatch] =
+    useState<BulkBatchState | null>(null);
+  const [liveTrackingSync, setLiveTrackingSync] =
+    useState<LiveTrackingSyncState | null>(null);
+  const [autoSyncEnabled, setAutoSyncEnabled] = useState(true);
+  const bulkRunningRef = useRef(false);
+  const initialAutoSyncRef = useRef(false);
+  const bulkPauseRequestedRef = useRef(false);
+  const bulkCancelRequestedRef = useRef(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+
+    try {
+      const [configResponse, ordersResponse] =
+        await Promise.all([
+          fetch("/api/tfm/config", {
+            cache: "no-store",
+          }),
+          fetch("/api/tfm/orders", {
+            cache: "no-store",
+          }),
+        ]);
+
+      const configData =
+        (await configResponse.json()) as ConfigResponse;
+      const ordersData =
+        (await ordersResponse.json()) as OrdersResponse;
+
+      setConfig(configData);
+
+      if (!ordersResponse.ok || !ordersData.success) {
+        throw new Error(
+          ordersData.message ||
+            "TFM tracking records could not load",
+        );
+      }
+
+      const nextOrders = ordersData.orders || [];
+
+      setOrders(nextOrders);
+      setBase(ordersData.base);
+      setSummary(ordersData.summary);
+      setSelected((current) =>
+        current.filter((recordId) =>
+          nextOrders.some(
+            (order) =>
+              order.recordId === recordId &&
+              order.valid &&
+              order.canCreateNewAwb !== false,
+          ),
+        ),
+      );
+    } catch (loadError) {
+      setOrders([]);
+      setBase(undefined);
+      setSummary(undefined);
+      setError(
+        loadError instanceof Error
+          ? loadError.message
+          : "TFM tracking records could not load",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem("mysmar-tfm-auto-sync-v1");
+    if (saved === "off") setAutoSyncEnabled(false);
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      "mysmar-tfm-auto-sync-v1",
+      autoSyncEnabled ? "on" : "off",
+    );
+  }, [autoSyncEnabled]);
+
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(
+        BULK_BATCH_STORAGE_KEY,
+      );
+
+      if (!saved) return;
+
+      const parsed = JSON.parse(saved) as BulkBatchState;
+
+      if (
+        !parsed ||
+        !parsed.id ||
+        !Array.isArray(parsed.pendingRecordIds) ||
+        !Array.isArray(parsed.results)
+      ) {
+        return;
+      }
+
+      setBulkBatch({
+        ...parsed,
+        status:
+          parsed.status === "running"
+            ? "paused"
+            : parsed.status,
+        updatedAt: new Date().toISOString(),
+      });
+      setBulkBatchSize(
+        Math.min(
+          50,
+          Math.max(1, Number(parsed.batchSize) || 10),
+        ),
+      );
+    } catch {
+      window.localStorage.removeItem(
+        BULK_BATCH_STORAGE_KEY,
+      );
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!bulkBatch) {
+      window.localStorage.removeItem(
+        BULK_BATCH_STORAGE_KEY,
+      );
+      return;
+    }
+
+    window.localStorage.setItem(
+      BULK_BATCH_STORAGE_KEY,
+      JSON.stringify(bulkBatch),
+    );
+  }, [bulkBatch]);
+
+  const statusCounts =
+    summary?.statusCounts || EMPTY_STATUS_COUNTS;
+
+  const filteredOrders = useMemo(() => {
+    const query = search.trim().toLowerCase();
+
+    return orders.filter((order) => {
+      const matchesSearch =
+        !query ||
+        [
+          order.orderNo,
+          order.customerName,
+          order.phone,
+          order.city,
+          order.area,
+          order.store,
+          order.awbNumber,
+          ...(order.previousAwbNumbers || []),
+          order.shipmentId,
+          order.tfmStatus,
+          order.statusGroup,
+          order.tfmLocation,
+          order.tfmExpectedDelivery,
+          ...order.issues.map(
+            (issue) =>
+              `${issue.field} ${issue.message}`,
+          ),
+        ]
+          .join(" ")
+          .toLowerCase()
+          .includes(query);
+
+      const matchesFilter =
+        filter === "all" ||
+        (filter === "ready" && order.valid) ||
+        (filter === "invalid" && !order.valid) ||
+        (filter === "existing_awb" &&
+          order.alreadyBooked) ||
+        (filter === "stale" && order.stale) ||
+        (filter ===
+          statusFilterValue(order.statusGroup));
+
+      return matchesSearch && matchesFilter;
+    });
+  }, [filter, orders, search]);
+
+  const selectableOrders = filteredOrders.filter(
+    (order) =>
+      order.valid &&
+      order.canCreateNewAwb !== false,
+  );
+
+  const liveTrackableOrders = useMemo(
+    () =>
+      orders.filter((order) => {
+        // TFM can be tracked by AWB, Shipment ID, or the Mysmar Order No that
+        // was sent to TFM as the Shipper Reference. Do not hide no-AWB orders.
+        if (!Boolean(order.awbNumber || order.shipmentId || order.orderNo)) {
+          return false;
+        }
+        if (["Returned", "Cancelled"].includes(order.statusGroup)) return false;
+
+        // Manual live tracking can still re-check delivered COD shipments
+        // until TFM releases COD. Automatic polling is filtered separately.
+        if (order.statusGroup === "Delivered") {
+          return order.codAmount > 0 && !order.codReceived;
+        }
+
+        return true;
+      }),
+    [orders],
+  );
+
+  const autoTrackableOrders = useMemo(
+    () =>
+      liveTrackableOrders.filter((order) => {
+        const erpOrderStatus = String(order.orderStatus || "")
+          .trim()
+          .toLowerCase()
+          .replace(/[_-]+/g, " ")
+          .replace(/\s+/g, " ");
+
+        const hasDirectTrackingId = Boolean(
+          order.awbNumber || order.shipmentId,
+        );
+        const looksBookedByReference =
+          Boolean(order.orderNo) &&
+          (order.statusGroup !== "Unknown" ||
+            erpOrderStatus === "dispatched" ||
+            erpOrderStatus === "dispatch" ||
+            erpOrderStatus === "ofd" ||
+            erpOrderStatus.includes("out for delivery") ||
+            erpOrderStatus.includes("in transit"));
+
+        // Avoid polling every unbooked Order Received row just because it has
+        // an Order No. No-AWB auto-sync is enabled only when the ERP/TFM state
+        // indicates that the shipment was already sent to TFM.
+        if (!hasDirectTrackingId && !looksBookedByReference) return false;
+
+        // Once ERP or TFM confirms Delivered, remove it from the recurring
+        // five-minute auto-sync queue. Manual tracking remains available.
+        return (
+          erpOrderStatus !== "delivered" &&
+          order.statusGroup !== "Delivered"
+        );
+      }),
+    [liveTrackableOrders],
+  );
+
+  useEffect(() => {
+    if (
+      !autoSyncEnabled ||
+      !config?.configuration?.trackingReady ||
+      !autoTrackableOrders.length
+    ) {
+      return;
+    }
+
+    let initialTimer = 0;
+
+    if (!initialAutoSyncRef.current && !actionBusy) {
+      initialAutoSyncRef.current = true;
+      initialTimer = window.setTimeout(() => {
+        if (document.visibilityState === "visible") {
+          void syncAllLiveTracking(false);
+        }
+      }, 5000);
+    }
+
+    const interval = window.setInterval(() => {
+      if (document.visibilityState !== "visible" || actionBusy) return;
+      void syncAllLiveTracking(false);
+    }, AUTO_LIVE_SYNC_INTERVAL_MS);
+
+    return () => {
+      if (initialTimer) window.clearTimeout(initialTimer);
+      window.clearInterval(interval);
+    };
+  }, [
+    autoSyncEnabled,
+    config?.configuration?.trackingReady,
+    autoTrackableOrders.length,
+    actionBusy,
+  ]);
+
+  const allVisibleSelected =
+    selectableOrders.length > 0 &&
+    selectableOrders.every((order) =>
+      selected.includes(order.recordId),
+    );
+
+  const bulkProgress = bulkBatch
+    ? Math.min(
+        100,
+        Math.round(
+          (bulkBatch.processed /
+            Math.max(1, bulkBatch.total)) *
+            100,
+        ),
+      )
+    : 0;
+
+  function toggleOrder(order: TfmOrder) {
+    if (
+      !order.valid ||
+      order.canCreateNewAwb === false
+    ) {
+      return;
+    }
+
+    setSelected((current) =>
+      current.includes(order.recordId)
+        ? current.filter(
+            (recordId) =>
+              recordId !== order.recordId,
+          )
+        : [...current, order.recordId],
+    );
+  }
+
+  function toggleVisible() {
+    const visibleIds = selectableOrders.map(
+      (order) => order.recordId,
+    );
+
+    setSelected((current) => {
+      if (allVisibleSelected) {
+        return current.filter(
+          (recordId) =>
+            !visibleIds.includes(recordId),
+        );
+      }
+
+      return Array.from(
+        new Set([...current, ...visibleIds]),
+      );
+    });
+  }
+
+  async function copySelectedOrders() {
+    const orderNumbers = orders
+      .filter((order) =>
+        selected.includes(order.recordId),
+      )
+      .map((order) => order.orderNo);
+
+    if (!orderNumbers.length) return;
+
+    await navigator.clipboard.writeText(
+      orderNumbers.join("\n"),
+    );
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  }
+
+  function downloadStatusCsv() {
+    if (!orders.length) return;
+
+    const rows = [
+      [
+        "Order Number",
+        "ERP Order Status",
+        "Customer",
+        "Mobile",
+        "Current AWB",
+        "Previous AWBs",
+        "TFM Status",
+        "Status Group",
+        "Booking Date",
+        "Last Action Date",
+        "Last Sync",
+        "Live Location",
+        "Expected Delivery",
+        "COD Status",
+        "COD Receive Date",
+        "COD Received",
+        "Days Since Last Action",
+        "Pending Warning",
+        "Total",
+        "Advance",
+        "COD",
+        "City",
+        "Area",
+        "Validation",
+        "New AWB Allowed",
+      ],
+      ...orders.map((order) => [
+        order.orderNo,
+        order.orderStatus,
+        order.customerName,
+        order.phone,
+        order.awbNumber,
+        (order.previousAwbNumbers || []).join(" | "),
+        order.tfmStatus,
+        order.statusGroup,
+        order.bookingDate,
+        order.lastActionDate,
+        order.lastSync,
+        order.tfmLocation,
+        order.tfmExpectedDelivery,
+        order.codStatus,
+        order.codReceiveDate,
+        order.codReceived ? "Yes" : "No",
+        order.daysSinceLastAction ?? "",
+        order.stale ? "Yes" : "No",
+        order.total,
+        order.advance,
+        order.codAmount,
+        order.city,
+        order.area,
+        order.issues
+          .map(
+            (issue) =>
+              `${issue.severity.toUpperCase()}: ${issue.field} - ${issue.message}`,
+          )
+          .join(" | "),
+        order.canCreateNewAwb ? "Yes" : "No",
+      ]),
+    ];
+
+    const csv = rows
+      .map((row) => row.map(csvCell).join(","))
+      .join("\r\n");
+
+    const blob = new Blob([`\uFEFF${csv}`], {
+      type: "text/csv;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = `tfm-status-${
+      base?.baseName
+        ?.replace(/[^a-z0-9]+/gi, "-")
+        .toLowerCase() || "report"
+    }.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  async function runShipmentAction(
+    action: ShipmentAction,
+    recordIds: string[],
+    labelOrderNo = "",
+  ) {
+    if (!recordIds.length) return;
+
+    if (
+      action === "cancel" &&
+      !window.confirm(
+        `Cancel ${recordIds.length} TFM shipment(s)? This action may not be reversible.`,
+      )
+    ) {
+      return;
+    }
+
+    const existingAwbOrders =
+      action === "create"
+        ? orders.filter(
+            (order) =>
+              recordIds.includes(order.recordId) &&
+              Boolean(order.awbNumber),
+          )
+        : [];
+    const confirmExistingAwb =
+      existingAwbOrders.length > 0
+        ? window.confirm(
+            `${existingAwbOrders.length} selected order(s) already have an AWB. Continue only when a replacement AWB is intentionally required.`,
+          )
+        : false;
+
+    if (existingAwbOrders.length > 0 && !confirmExistingAwb) return;
+
+    const key = `${action}:${recordIds.join(",")}`;
+    setActionBusy(key);
+    setActionMessage("");
+    setActionError("");
+    setActionFailures([]);
+
+    try {
+      const response = await fetch("/api/tfm/shipments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({
+          action,
+          recordIds,
+          confirmExistingAwb,
+        }),
+      });
+
+      if (action === "label" && response.ok) {
+        const blob = await response.blob();
+        const disposition =
+          response.headers.get("content-disposition") || "";
+        const match = disposition.match(/filename="?([^";]+)"?/i);
+        const labelCount = Math.max(
+          1,
+          Number(
+            response.headers.get("x-tfm-label-count") ||
+              recordIds.length,
+          ) || 1,
+        );
+        const failedCount = Math.max(
+          0,
+          Number(
+            response.headers.get("x-tfm-failed-count") || 0,
+          ) || 0,
+        );
+        const failedOrdersHeader =
+          response.headers.get("x-tfm-failed-orders") || "";
+        let failedOrders = "";
+
+        try {
+          failedOrders = decodeURIComponent(
+            failedOrdersHeader,
+          );
+        } catch {
+          failedOrders = failedOrdersHeader;
+        }
+
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download =
+          match?.[1] ||
+          (recordIds.length > 1
+            ? `TFM-Bulk-Labels-${labelCount}.pdf`
+            : `TFM-${labelOrderNo || "label"}.pdf`);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+
+        setActionMessage(
+          failedCount > 0
+            ? `${labelCount} TFM label(s) downloaded in one PDF. ${failedCount} failed${
+                failedOrders
+                  ? `: ${failedOrders}`
+                  : "."
+              }`
+            : `${labelCount} TFM label(s) downloaded in one PDF. Open the PDF and press Ctrl + P to print.`,
+        );
+        return;
+      }
+
+      const data =
+        (await response.json()) as ShipmentActionResponse;
+
+      if (!response.ok) {
+        throw new Error(data.message || `TFM ${action} failed`);
+      }
+
+      const failures = (data.results || []).filter(
+        (item) => !item.success,
+      );
+
+      if (!data.success && !data.partial) {
+        throw new Error(
+          failures[0]?.message ||
+            data.message ||
+            `TFM ${action} failed`,
+        );
+      }
+
+      setActionMessage(
+        data.message || `TFM ${action} completed`,
+      );
+      setActionFailures(failures);
+
+      if (action !== "label") {
+        await load();
+      }
+    } catch (actionFailure) {
+      setActionError(
+        actionFailure instanceof Error
+          ? actionFailure.message
+          : `TFM ${action} failed`,
+      );
+    } finally {
+      setActionBusy("");
+    }
+  }
+
+  async function syncAllLiveTracking(interactive = true) {
+    const trackingOrders = interactive
+      ? liveTrackableOrders
+      : autoTrackableOrders;
+
+    if (
+      !config?.configuration?.trackingReady ||
+      !trackingOrders.length ||
+      actionBusy
+    ) {
+      return;
+    }
+
+    if (interactive) {
+      const approved = window.confirm(
+        [
+          `Sync live TFM tracking for ${trackingOrders.length} shipment(s)?`,
+          `Chunk size: ${LIVE_TRACKING_CHUNK_SIZE}`,
+          "If AWB is blank, Order No is used as the TFM Shipper Reference.",
+          "Delivered COD shipments remain available for manual tracking until COD is released.",
+          "Automatic sync skips orders as soon as ERP/TFM status is Delivered.",
+          "TFM Checked In/In Transit → Dispatched, OFD → OFD, Delivered → Delivered.",
+          "TFM COD Released → COD Status Received + COD Receive Date.",
+        ].join("\n"),
+      );
+
+      if (!approved) return;
+    }
+
+    const recordIds = trackingOrders.map(
+      (order) => order.recordId,
+    );
+    const startedAt = new Date().toISOString();
+    let processed = 0;
+    let successful = 0;
+    let failed = 0;
+    const failures: NonNullable<
+      ShipmentActionResponse["results"]
+    > = [];
+
+    setActionBusy("track-all");
+    setActionMessage("");
+    setActionError("");
+    setActionFailures([]);
+    setLiveTrackingSync({
+      running: true,
+      total: recordIds.length,
+      processed: 0,
+      successful: 0,
+      failed: 0,
+      startedAt,
+      updatedAt: startedAt,
+    });
+
+    try {
+      for (
+        let index = 0;
+        index < recordIds.length;
+        index += LIVE_TRACKING_CHUNK_SIZE
+      ) {
+        const chunk = recordIds.slice(
+          index,
+          index + LIVE_TRACKING_CHUNK_SIZE,
+        );
+
+        try {
+          const response = await fetch(
+            "/api/tfm/shipments",
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              cache: "no-store",
+              body: JSON.stringify({
+                action: "track",
+                recordIds: chunk,
+              }),
+            },
+          );
+
+          const data =
+            (await response.json()) as ShipmentActionResponse;
+
+          if (!response.ok) {
+            throw new Error(
+              data.message ||
+                "TFM live tracking chunk failed",
+            );
+          }
+
+          const resultByRecordId = new Map(
+            (data.results || []).map((item) => [
+              item.recordId,
+              item,
+            ]),
+          );
+
+          for (const recordId of chunk) {
+            const item = resultByRecordId.get(recordId);
+
+            if (item?.success) {
+              successful += 1;
+              continue;
+            }
+
+            failed += 1;
+            failures.push(
+              item || {
+                recordId,
+                orderNo:
+                  orders.find(
+                    (order) =>
+                      order.recordId === recordId,
+                  )?.orderNo || recordId,
+                success: false,
+                message:
+                  "TFM response did not include this shipment",
+              },
+            );
+          }
+        } catch (chunkError) {
+          const message =
+            chunkError instanceof Error
+              ? chunkError.message
+              : "TFM live tracking chunk failed";
+
+          failed += chunk.length;
+
+          for (const recordId of chunk) {
+            failures.push({
+              recordId,
+              orderNo:
+                orders.find(
+                  (order) =>
+                    order.recordId === recordId,
+                )?.orderNo || recordId,
+              success: false,
+              message,
+            });
+          }
+        }
+
+        processed += chunk.length;
+
+        setLiveTrackingSync({
+          running: true,
+          total: recordIds.length,
+          processed,
+          successful,
+          failed,
+          startedAt,
+          updatedAt: new Date().toISOString(),
+        });
+
+        if (index + LIVE_TRACKING_CHUNK_SIZE < recordIds.length) {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, 250),
+          );
+        }
+      }
+
+      setActionFailures(failures);
+      setActionMessage(
+        `${interactive ? "Live" : "Automatic"} tracking sync complete: ${successful} updated, ${failed} failed.`,
+      );
+
+      await load();
+    } catch (syncError) {
+      setActionError(
+        syncError instanceof Error
+          ? syncError.message
+          : "TFM live tracking sync failed",
+      );
+    } finally {
+      setLiveTrackingSync((current) =>
+        current
+          ? {
+              ...current,
+              running: false,
+              updatedAt: new Date().toISOString(),
+            }
+          : current,
+      );
+      setActionBusy("");
+    }
+  }
+
+  function bulkOrderLabel(recordId: string) {
+    return (
+      orders.find((order) => order.recordId === recordId)
+        ?.orderNo || recordId
+    );
+  }
+
+  function skippedBulkResult(
+    order: TfmOrder,
+    message: string,
+  ): BulkBatchResult {
+    return {
+      recordId: order.recordId,
+      orderNo: order.orderNo,
+      success: false,
+      awbNumber: order.awbNumber,
+      shipmentId: order.shipmentId,
+      status: order.tfmStatus,
+      message,
+      outcome: "skipped",
+      processedAt: new Date().toISOString(),
+    };
+  }
+
+  async function processBulkBatch(
+    initialBatch: BulkBatchState,
+  ) {
+    if (bulkRunningRef.current) return;
+
+    bulkRunningRef.current = true;
+    bulkPauseRequestedRef.current = false;
+    bulkCancelRequestedRef.current = false;
+    setActionMessage("");
+    setActionError("");
+    setActionFailures([]);
+
+    let working: BulkBatchState = {
+      ...initialBatch,
+      status: "running",
+      updatedAt: new Date().toISOString(),
+    };
+
+    setBulkBatch(working);
+    setActionBusy(`bulk:${working.id}`);
+
+    try {
+      while (working.pendingRecordIds.length > 0) {
+        if (bulkCancelRequestedRef.current) {
+          working = {
+            ...working,
+            status: "cancelled",
+            updatedAt: new Date().toISOString(),
+          };
+          setBulkBatch(working);
+          break;
+        }
+
+        if (bulkPauseRequestedRef.current) {
+          working = {
+            ...working,
+            status: "paused",
+            updatedAt: new Date().toISOString(),
+          };
+          setBulkBatch(working);
+          break;
+        }
+
+        const chunk = working.pendingRecordIds.slice(
+          0,
+          working.batchSize,
+        );
+        const remaining = working.pendingRecordIds.slice(
+          chunk.length,
+        );
+        let chunkResults: BulkBatchResult[] = [];
+
+        try {
+          const response = await fetch(
+            "/api/tfm/shipments",
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              cache: "no-store",
+              body: JSON.stringify({
+                action: "create",
+                recordIds: chunk,
+                confirmExistingAwb: false,
+              }),
+            },
+          );
+          const data =
+            (await response.json()) as ShipmentActionResponse;
+
+          if (!response.ok) {
+            throw new Error(
+              data.message ||
+                "TFM bulk request failed",
+            );
+          }
+
+          const responseByRecordId = new Map(
+            (data.results || []).map((item) => [
+              item.recordId,
+              item,
+            ]),
+          );
+          const processedAt = new Date().toISOString();
+
+          chunkResults = chunk.map((recordId) => {
+            const item = responseByRecordId.get(recordId);
+
+            if (!item) {
+              return {
+                recordId,
+                orderNo: bulkOrderLabel(recordId),
+                success: false,
+                message:
+                  "TFM response did not include this order",
+                outcome: "failed",
+                processedAt,
+              };
+            }
+
+            return {
+              ...item,
+              outcome: item.success
+                ? "created"
+                : "failed",
+              processedAt,
+            };
+          });
+        } catch (bulkError) {
+          const message =
+            bulkError instanceof Error
+              ? bulkError.message
+              : "TFM bulk request failed";
+          const processedAt = new Date().toISOString();
+
+          chunkResults = chunk.map((recordId) => ({
+            recordId,
+            orderNo: bulkOrderLabel(recordId),
+            success: false,
+            message,
+            outcome: "failed",
+            processedAt,
+          }));
+        }
+
+        const successfulNow = chunkResults.filter(
+          (item) => item.outcome === "created",
+        ).length;
+        const failedNow = chunkResults.filter(
+          (item) => item.outcome === "failed",
+        ).length;
+
+        working = {
+          ...working,
+          pendingRecordIds: remaining,
+          processed: working.processed + chunk.length,
+          successful:
+            working.successful + successfulNow,
+          failed: working.failed + failedNow,
+          results: [...working.results, ...chunkResults],
+          updatedAt: new Date().toISOString(),
+        };
+        setBulkBatch(working);
+
+        await new Promise((resolve) =>
+          window.setTimeout(resolve, 250),
+        );
+      }
+
+      if (
+        working.pendingRecordIds.length === 0 &&
+        working.status === "running"
+      ) {
+        working = {
+          ...working,
+          status: "completed",
+          updatedAt: new Date().toISOString(),
+        };
+        setBulkBatch(working);
+      }
+
+      if (working.successful > 0) {
+        await load();
+      }
+
+      if (working.status === "completed") {
+        setActionMessage(
+          `Bulk batch completed: ${working.successful} created, ${working.failed} failed, ${working.skipped} skipped.`,
+        );
+      } else if (working.status === "paused") {
+        setActionMessage(
+          `Bulk batch paused with ${working.pendingRecordIds.length} order(s) remaining.`,
+        );
+      } else if (working.status === "cancelled") {
+        setActionMessage(
+          `Bulk batch stopped with ${working.pendingRecordIds.length} order(s) remaining.`,
+        );
+      }
+    } finally {
+      bulkRunningRef.current = false;
+      setActionBusy("");
+    }
+  }
+
+  function beginBulkBatch(recordIds: string[]) {
+    const uniqueIds = Array.from(new Set(recordIds));
+    const selectedOrders = uniqueIds
+      .map((recordId) =>
+        orders.find((order) => order.recordId === recordId),
+      )
+      .filter((order): order is TfmOrder => Boolean(order));
+    const eligibleOrders = selectedOrders.filter(
+      (order) =>
+        order.valid &&
+        order.canCreateNewAwb !== false &&
+        !order.awbNumber,
+    );
+    const skippedResults = selectedOrders
+      .filter(
+        (order) =>
+          !eligibleOrders.some(
+            (eligible) =>
+              eligible.recordId === order.recordId,
+          ),
+      )
+      .map((order) =>
+        skippedBulkResult(
+          order,
+          order.awbNumber
+            ? `Existing AWB ${order.awbNumber} was skipped. Bulk mode never replaces an AWB.`
+            : !order.valid
+              ? "Order validation failed and was skipped."
+              : "Order is not eligible for a new AWB and was skipped.",
+        ),
+      );
+
+    if (!eligibleOrders.length) {
+      setActionError(
+        "No selected order is eligible for bulk AWB creation. Existing AWBs are skipped for safety.",
+      );
+      return;
+    }
+
+    const environment =
+      config?.configuration?.environment || "sandbox";
+    const approved = window.confirm(
+      [
+        `Start TFM bulk batch in ${environment.toUpperCase()} mode?`,
+        `Selected: ${selectedOrders.length}`,
+        `Will create: ${eligibleOrders.length}`,
+        `Will skip: ${skippedResults.length}`,
+        `Chunk size: ${bulkBatchSize}`,
+        "Existing AWBs will NOT be replaced.",
+      ].join("\n"),
+    );
+
+    if (!approved) return;
+
+    const now = new Date().toISOString();
+    const batch: BulkBatchState = {
+      id: crypto.randomUUID(),
+      status: "running",
+      batchSize: Math.min(
+        50,
+        Math.max(1, Number(bulkBatchSize) || 10),
+      ),
+      total: selectedOrders.length,
+      processed: skippedResults.length,
+      successful: 0,
+      failed: 0,
+      skipped: skippedResults.length,
+      pendingRecordIds: eligibleOrders.map(
+        (order) => order.recordId,
+      ),
+      results: skippedResults,
+      startedAt: now,
+      updatedAt: now,
+      environment,
+    };
+
+    void processBulkBatch(batch);
+  }
+
+  function pauseBulkBatch() {
+    bulkPauseRequestedRef.current = true;
+  }
+
+  function resumeBulkBatch() {
+    if (
+      !bulkBatch ||
+      !bulkBatch.pendingRecordIds.length ||
+      bulkRunningRef.current
+    ) {
+      return;
+    }
+
+    const currentEnvironment =
+      config?.configuration?.environment || "sandbox";
+
+    if (currentEnvironment !== bulkBatch.environment) {
+      const approved = window.confirm(
+        `This batch started in ${bulkBatch.environment.toUpperCase()} mode, but ERP is now in ${currentEnvironment.toUpperCase()} mode. Continue with the current ERP environment?`,
+      );
+
+      if (!approved) return;
+    }
+
+    void processBulkBatch({
+      ...bulkBatch,
+      environment: currentEnvironment,
+      status: "running",
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  function stopBulkBatch() {
+    if (
+      !window.confirm(
+        "Stop this bulk batch after the current chunk finishes? Remaining orders will stay saved for resume.",
+      )
+    ) {
+      return;
+    }
+
+    bulkCancelRequestedRef.current = true;
+
+    if (!bulkRunningRef.current && bulkBatch) {
+      setBulkBatch({
+        ...bulkBatch,
+        status: "cancelled",
+        updatedAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  function retryFailedBulkBatch() {
+    if (!bulkBatch) return;
+
+    const failedIds = Array.from(
+      new Set(
+        bulkBatch.results
+          .filter((item) => item.outcome === "failed")
+          .map((item) => item.recordId),
+      ),
+    );
+
+    if (!failedIds.length) return;
+    beginBulkBatch(failedIds);
+  }
+
+  function downloadBulkBatchCsv() {
+    if (!bulkBatch?.results.length) return;
+
+    const rows = [
+      [
+        "Outcome",
+        "Order Number",
+        "AWB",
+        "Shipment ID",
+        "Status",
+        "Message",
+        "Processed At",
+      ],
+      ...bulkBatch.results.map((item) => [
+        item.outcome,
+        item.orderNo,
+        item.awbNumber || "",
+        item.shipmentId || "",
+        item.status || "",
+        item.message,
+        item.processedAt,
+      ]),
+    ];
+    const csv = rows
+      .map((row) => row.map(csvCell).join(","))
+      .join("\r\n");
+    const blob = new Blob([`\uFEFF${csv}`], {
+      type: "text/csv;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = `tfm-bulk-${bulkBatch.id}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function clearBulkBatch() {
+    if (bulkRunningRef.current) return;
+    setBulkBatch(null);
+  }
+
+  function selectedTrackableIds() {
+    return orders
+      .filter(
+        (order) =>
+          selected.includes(order.recordId) &&
+          Boolean(order.awbNumber || order.shipmentId),
+      )
+      .map((order) => order.recordId);
+  }
+
+  function bulkPrintableIds() {
+    if (!bulkBatch) return [];
+
+    return Array.from(
+      new Set(
+        bulkBatch.results
+          .filter(
+            (item) =>
+              item.outcome === "created" &&
+              item.success &&
+              Boolean(item.awbNumber || item.shipmentId),
+          )
+          .map((item) => item.recordId),
+      ),
+    );
+  }
+
+  async function testAuthentication() {
+    setAuthTesting(true);
+    setAuthError("");
+    setAuthResult(undefined);
+
+    try {
+      const response = await fetch(
+        "/api/tfm/auth/test",
+        {
+          method: "POST",
+          cache: "no-store",
+        },
+      );
+      const data =
+        (await response.json()) as AuthTestResponse;
+
+      if (!response.ok || !data.success) {
+        throw new Error(
+          data.message ||
+            "TFM authentication test failed",
+        );
+      }
+
+      setAuthResult(data.authentication);
+    } catch (testError) {
+      setAuthError(
+        testError instanceof Error
+          ? testError.message
+          : "TFM authentication test failed",
+      );
+    } finally {
+      setAuthTesting(false);
+    }
+  }
+
+  const statusCards: Array<{
+    label: TfmStatusGroup;
+    value: number;
+  }> = [
+    {
+      label: "Created",
+      value: statusCounts.Created,
+    },
+    {
+      label: "In Transit",
+      value: statusCounts["In Transit"],
+    },
+    {
+      label: "Out for Delivery",
+      value: statusCounts["Out for Delivery"],
+    },
+    {
+      label: "On Hold",
+      value: statusCounts["On Hold"],
+    },
+    {
+      label: "Delivered",
+      value: statusCounts.Delivered,
+    },
+    {
+      label: "Returned",
+      value: statusCounts.Returned,
+    },
+    {
+      label: "Cancelled",
+      value: statusCounts.Cancelled,
+    },
+    {
+      label: "Unknown",
+      value: statusCounts.Unknown,
+    },
+  ];
+
+  return (
+    <div className="space-y-6">
+      <header className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-black text-blue-700">
+            <Truck size={18} />
+            TFM Integration
+          </div>
+
+          <h1 className="mt-1 text-3xl font-black text-slate-950">
+            TFM Status Dashboard
+          </h1>
+
+          <p className="mt-1 max-w-3xl text-sm font-bold leading-6 text-slate-500">
+            Review imported AWBs, current courier status,
+            last movement, pending shipments and pre-booking
+            validation. Existing AWBs are warnings and do not
+            block a future new AWB.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Link
+            href="/courier/tfm/import-awb"
+            className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 text-sm font-black text-white transition hover:bg-blue-700"
+          >
+            <FileSpreadsheet size={17} />
+            Import AWB Report
+          </Link>
+
+          <button
+            type="button"
+            onClick={downloadStatusCsv}
+            disabled={!orders.length}
+            className="inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-5 text-sm font-black text-slate-700 transition hover:bg-slate-50 disabled:opacity-40"
+          >
+            <Download size={17} />
+            Download Status CSV
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void syncAllLiveTracking(true)}
+            disabled={
+              !config?.configuration?.trackingReady ||
+              !liveTrackableOrders.length ||
+              Boolean(actionBusy)
+            }
+            className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 text-sm font-black text-white transition hover:bg-blue-700 disabled:opacity-40"
+          >
+            {actionBusy === "track-all" ? (
+              <Loader2 size={17} className="animate-spin" />
+            ) : (
+              <Radio size={17} />
+            )}
+            Sync All Live ({liveTrackableOrders.length})
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setAutoSyncEnabled((current) => !current)}
+            className={[
+              "inline-flex h-11 items-center justify-center gap-2 rounded-xl border px-4 text-sm font-black transition",
+              autoSyncEnabled
+                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                : "border-slate-200 bg-white text-slate-500",
+            ].join(" ")}
+            title="Automatically sync active non-delivered TFM shipments every 5 minutes while this dashboard is open"
+          >
+            <Radio size={17} />
+            Auto Sync {autoSyncEnabled ? "ON" : "OFF"}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void load()}
+            disabled={loading || actionBusy === "track-all"}
+            className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-slate-950 px-5 text-sm font-black text-white disabled:opacity-50"
+          >
+            <RefreshCw
+              size={17}
+              className={
+                loading ? "animate-spin" : ""
+              }
+            />
+            Refresh
+          </button>
+        </div>
+      </header>
+
+      {error && (
+        <div className="rounded-2xl border border-red-200 bg-red-50 p-4 font-bold text-red-700">
+          {error}
+        </div>
+      )}
+
+      {base && (
+        <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
+          <div className="flex items-start gap-3">
+            <ShieldCheck
+              size={20}
+              className="mt-0.5 text-blue-700"
+            />
+
+            <div>
+              <p className="font-black text-blue-900">
+                {base.baseName}
+              </p>
+              <p className="mt-1 text-xs font-bold text-blue-700">
+                Invoice table: {base.invoiceTable}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {config?.supported && (
+        <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div className="flex items-start gap-3">
+              <div
+                className={[
+                  "grid h-11 w-11 shrink-0 place-items-center rounded-2xl",
+                  config.configuration
+                    ?.authenticationReady
+                    ? "bg-emerald-50 text-emerald-700"
+                    : "bg-amber-50 text-amber-700",
+                ].join(" ")}
+              >
+                <KeyRound size={20} />
+              </div>
+
+              <div>
+                <p className="font-black text-slate-950">
+                  TFM Authentication
+                </p>
+
+                <p className="mt-1 text-sm font-bold leading-6 text-slate-500">
+                  {config.configuration?.authenticationReady
+                    ? config.configuration.liveRequestsAllowed
+                      ? "Credentials are configured and live TFM requests are enabled."
+                      : "Credentials are configured. Live requests remain safety-locked until sandbox verification is complete."
+                    : "Add TFM_USERNAME and TFM_PASSWORD to .env.local, then restart the server."}
+                </p>
+
+                <p className="mt-2 text-xs font-bold text-slate-400">
+                  {config.configuration?.environment?.toUpperCase()}{" "}
+                  · {config.configuration?.apiBaseUrl}
+                  {config.configuration?.authPath}
+                </p>
+              </div>
+            </div>
+
+            {config.canTestAuthentication && (
+              <button
+                type="button"
+                onClick={() =>
+                  void testAuthentication()
+                }
+                disabled={
+                  authTesting ||
+                  !config.configuration
+                    ?.authenticationReady
+                }
+                className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {authTesting ? (
+                  <Loader2
+                    size={17}
+                    className="animate-spin"
+                  />
+                ) : (
+                  <KeyRound size={17} />
+                )}
+                Test TFM Login
+              </button>
+            )}
+          </div>
+
+          {authError && (
+            <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm font-bold text-red-700">
+              {authError}
+            </div>
+          )}
+
+          {authResult && (
+            <div className="mt-4 grid gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 sm:grid-cols-2 xl:grid-cols-4">
+              <InfoValue
+                label="Status"
+                value="Authenticated"
+              />
+              <InfoValue
+                label="Shipper ID"
+                value={authResult.shipperId}
+              />
+              <InfoValue
+                label="User ID"
+                value={authResult.userId || "—"}
+              />
+              <InfoValue
+                label="Token Expires"
+                value={formatDate(
+                  authResult.expiresAt,
+                )}
+              />
+            </div>
+          )}
+        </section>
+      )}
+
+      <div
+        className={[
+          "rounded-2xl border p-4",
+          config?.configuration?.bookingReady ||
+          config?.configuration?.trackingReady
+            ? "border-emerald-200 bg-emerald-50"
+            : "border-amber-200 bg-amber-50",
+        ].join(" ")}
+      >
+        <div className="flex items-start gap-3">
+          {config?.configuration?.bookingReady ||
+          config?.configuration?.trackingReady ? (
+            <CheckCircle2
+              size={20}
+              className="mt-0.5 text-emerald-700"
+            />
+          ) : (
+            <AlertTriangle
+              size={20}
+              className="mt-0.5 text-amber-700"
+            />
+          )}
+
+          <div>
+            <p
+              className={[
+                "font-black",
+                config?.configuration?.bookingReady ||
+                config?.configuration?.trackingReady
+                  ? "text-emerald-900"
+                  : "text-amber-900",
+              ].join(" ")}
+            >
+              {config?.configuration?.bookingReady ||
+              config?.configuration?.trackingReady
+                ? "Live TFM actions are available"
+                : "CSV sync remains available while live endpoints are locked"}
+            </p>
+
+            <p
+              className={[
+                "mt-1 text-sm font-bold leading-6",
+                config?.configuration?.bookingReady ||
+                config?.configuration?.trackingReady
+                  ? "text-emerald-800"
+                  : "text-amber-800",
+              ].join(" ")}
+            >
+              Booking: {config?.configuration?.bookingReady ? "Ready" : "Not ready"}
+              {" · "}Tracking: {config?.configuration?.trackingReady ? "Ready" : "Not ready"}
+              {" · "}Cancellation: {config?.configuration?.cancellationReady ? "Ready" : "Not ready"}
+              {" · "}Label: {config?.configuration?.labelReady ? "Ready" : "Not ready"}.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {liveTrackingSync && (
+        <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="font-black text-blue-900">
+                Live Tracking Sync
+              </p>
+              <p className="mt-1 text-xs font-bold text-blue-700">
+                {liveTrackingSync.processed} / {liveTrackingSync.total} processed
+                {" · "}
+                {liveTrackingSync.successful} updated
+                {" · "}
+                {liveTrackingSync.failed} failed
+              </p>
+            </div>
+
+            <span className="text-lg font-black text-blue-900">
+              {Math.round(
+                (liveTrackingSync.processed /
+                  Math.max(1, liveTrackingSync.total)) *
+                  100,
+              )}
+              %
+            </span>
+          </div>
+
+          <div className="mt-3 h-2 overflow-hidden rounded-full bg-blue-100">
+            <div
+              className="h-full rounded-full bg-blue-600 transition-all"
+              style={{
+                width: `${Math.round(
+                  (liveTrackingSync.processed /
+                    Math.max(1, liveTrackingSync.total)) *
+                    100,
+                )}%`,
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {actionError && (
+        <div className="rounded-2xl border border-red-200 bg-red-50 p-4 font-bold text-red-700">
+          {actionError}
+        </div>
+      )}
+
+      {actionMessage && (
+        <div
+          className={[
+            "rounded-2xl border p-4 font-bold",
+            actionFailures.length
+              ? "border-amber-200 bg-amber-50 text-amber-800"
+              : "border-emerald-200 bg-emerald-50 text-emerald-800",
+          ].join(" ")}
+        >
+          <p className="font-black">{actionMessage}</p>
+          {actionFailures.length > 0 && (
+            <div className="mt-2 space-y-1 text-xs text-amber-800">
+              {actionFailures.slice(0, 20).map((item) => (
+                <p key={`${item.recordId}:${item.message}`}>
+                  {item.orderNo}: {item.message}
+                </p>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-6">
+        <StatCard
+          label="TFM Records"
+          value={summary?.total || 0}
+          icon={Truck}
+        />
+        <StatCard
+          label="Valid for New AWB"
+          value={summary?.valid || 0}
+          icon={CheckCircle2}
+        />
+        <StatCard
+          label="Needs Fix"
+          value={summary?.invalid || 0}
+          icon={XCircle}
+        />
+        <StatCard
+          label="Existing AWB"
+          value={summary?.alreadyBooked || 0}
+          icon={PackageCheck}
+        />
+        <StatCard
+          label="No Movement 3+ Days"
+          value={summary?.stale || 0}
+          icon={Clock3}
+        />
+        <StatCard
+          label="COD Awaiting Release"
+          value={summary?.codPending || 0}
+          icon={PackageCheck}
+        />
+      </section>
+
+      <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div>
+          <p className="text-xs font-black uppercase tracking-wide text-slate-500">
+            Courier Status
+          </p>
+
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8">
+            {statusCards.map((item) => {
+              const Icon = statusIcon(item.label);
+              const active =
+                filter ===
+                statusFilterValue(item.label);
+
+              return (
+                <button
+                  key={item.label}
+                  type="button"
+                  onClick={() =>
+                    setFilter(
+                      statusFilterValue(item.label),
+                    )
+                  }
+                  className={[
+                    "rounded-2xl border p-4 text-left transition",
+                    active
+                      ? "border-blue-600 bg-blue-600 text-white"
+                      : "border-slate-200 bg-slate-50 text-slate-700 hover:border-blue-300 hover:bg-blue-50",
+                  ].join(" ")}
+                >
+                  <div className="flex items-center justify-between">
+                    <Icon size={18} />
+                    <span className="text-2xl font-black">
+                      {item.value}
+                    </span>
+                  </div>
+                  <p className="mt-3 text-xs font-black">
+                    {item.label}
+                  </p>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="mt-5 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+          <div className="relative w-full xl:max-w-xl">
+            <Search
+              size={17}
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+            />
+            <input
+              value={search}
+              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                setSearch(event.target.value)
+              }
+              placeholder="Search order, customer, AWB, status, city or issue..."
+              className="h-11 w-full rounded-xl border border-slate-200 pl-10 pr-4 text-sm font-bold outline-none focus:border-blue-400"
+            />
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {(
+              [
+                ["all", "All"],
+                ["ready", "Valid"],
+                ["invalid", "Needs Fix"],
+                ["existing_awb", "Existing AWB"],
+                ["stale", "No Movement 3+ Days"],
+              ] as Array<[Filter, string]>
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setFilter(value)}
+                className={[
+                  "h-10 rounded-xl border px-4 text-xs font-black transition",
+                  filter === value
+                    ? "border-blue-600 bg-blue-600 text-white"
+                    : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50",
+                ].join(" ")}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="mt-4 flex flex-col gap-3 rounded-2xl bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between">
+          <label className="flex items-center gap-3 text-sm font-black text-slate-700">
+            <input
+              type="checkbox"
+              checked={allVisibleSelected}
+              onChange={toggleVisible}
+              disabled={!selectableOrders.length}
+              className="h-4 w-4 rounded"
+            />
+            Select visible valid orders
+          </label>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() =>
+                void runShipmentAction("create", selected)
+              }
+              disabled={
+                !selected.length ||
+                Boolean(actionBusy) ||
+                !config?.configuration?.bookingReady
+              }
+              className="inline-flex h-10 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-xs font-black text-white disabled:opacity-40"
+            >
+              {actionBusy.startsWith("create:") ? (
+                <Loader2 size={15} className="animate-spin" />
+              ) : (
+                <Send size={15} />
+              )}
+              Create AWB ({selected.length})
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                void runShipmentAction(
+                  "track",
+                  selectedTrackableIds(),
+                )
+              }
+              disabled={
+                !selectedTrackableIds().length ||
+                Boolean(actionBusy) ||
+                !config?.configuration?.trackingReady
+              }
+              className="inline-flex h-10 items-center gap-2 rounded-xl bg-blue-600 px-4 text-xs font-black text-white disabled:opacity-40"
+            >
+              {actionBusy.startsWith("track:") ? (
+                <Loader2 size={15} className="animate-spin" />
+              ) : (
+                <Radio size={15} />
+              )}
+              Sync Selected ({selectedTrackableIds().length})
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                void runShipmentAction(
+                  "label",
+                  selectedTrackableIds(),
+                  `selected-${selectedTrackableIds().length}`,
+                )
+              }
+              disabled={
+                !selectedTrackableIds().length ||
+                Boolean(actionBusy) ||
+                !config?.configuration?.labelReady
+              }
+              className="inline-flex h-10 items-center gap-2 rounded-xl bg-slate-800 px-4 text-xs font-black text-white disabled:opacity-40"
+            >
+              {actionBusy.startsWith("label:") ? (
+                <Loader2 size={15} className="animate-spin" />
+              ) : (
+                <Printer size={15} />
+              )}
+              Download/Print Labels ({selectedTrackableIds().length})
+            </button>
+
+            <button
+              type="button"
+              onClick={() => void copySelectedOrders()}
+              disabled={!selected.length}
+              className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-xs font-black text-slate-700 disabled:opacity-40"
+            >
+              <ClipboardCopy size={15} />
+              {copied
+                ? "Copied"
+                : `Copy Selected (${selected.length})`}
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-4 rounded-2xl border border-violet-200 bg-violet-50/60 p-4">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <PackageCheck size={18} className="text-violet-700" />
+                <h3 className="font-black text-violet-950">
+                  TFM Bulk Batch Creator
+                </h3>
+                <span
+                  className={[
+                    "rounded-full px-2.5 py-1 text-[10px] font-black uppercase",
+                    config?.configuration?.environment === "production"
+                      ? "bg-red-100 text-red-700"
+                      : "bg-emerald-100 text-emerald-700",
+                  ].join(" ")}
+                >
+                  {config?.configuration?.environment || "sandbox"}
+                </span>
+              </div>
+              <p className="mt-1 text-xs font-bold leading-5 text-violet-700">
+                Creates AWBs in safe chunks. Existing AWBs and invalid orders
+                are skipped automatically; bulk mode never replaces an AWB.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="text-[11px] font-black text-slate-600">
+                <span className="mb-1 block">Chunk size</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={bulkBatchSize}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                    setBulkBatchSize(
+                      Math.min(
+                        50,
+                        Math.max(
+                          1,
+                          Number(event.target.value) || 1,
+                        ),
+                      ),
+                    )
+                  }
+                  disabled={bulkBatch?.status === "running"}
+                  className="h-10 w-24 rounded-xl border border-violet-200 bg-white px-3 font-black outline-none focus:border-violet-500 disabled:opacity-50"
+                />
+              </label>
+
+              <button
+                type="button"
+                onClick={() => beginBulkBatch(selected)}
+                disabled={
+                  !selected.length ||
+                  Boolean(actionBusy) ||
+                  !config?.configuration?.bookingReady
+                }
+                className="inline-flex h-10 items-center gap-2 rounded-xl bg-violet-700 px-4 text-xs font-black text-white disabled:opacity-40"
+              >
+                {actionBusy.startsWith("bulk:") ? (
+                  <Loader2 size={15} className="animate-spin" />
+                ) : (
+                  <PackageCheck size={15} />
+                )}
+                Start Bulk ({selected.length})
+              </button>
+            </div>
+          </div>
+
+          {bulkBatch && (
+            <div className="mt-4 rounded-2xl border border-violet-200 bg-white p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-black uppercase tracking-wide text-violet-700">
+                    Batch {bulkBatch.id.slice(0, 8)} · {bulkBatch.status}
+                  </p>
+                  <p className="mt-1 text-xs font-bold text-slate-500">
+                    Started {formatDate(bulkBatch.startedAt)} · {bulkBatch.environment}
+                  </p>
+                </div>
+                <span className="text-lg font-black text-violet-800">
+                  {bulkProgress}%
+                </span>
+              </div>
+
+              <div className="mt-3 h-3 overflow-hidden rounded-full bg-violet-100">
+                <div
+                  className="h-full rounded-full bg-violet-600 transition-all"
+                  style={{ width: `${bulkProgress}%` }}
+                />
+              </div>
+
+              <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+                {[
+                  ["Total", bulkBatch.total],
+                  ["Processed", bulkBatch.processed],
+                  ["Created", bulkBatch.successful],
+                  ["Failed", bulkBatch.failed],
+                  ["Skipped", bulkBatch.skipped],
+                  ["Remaining", bulkBatch.pendingRecordIds.length],
+                ].map(([label, value]) => (
+                  <div
+                    key={String(label)}
+                    className="rounded-xl bg-slate-50 px-3 py-2"
+                  >
+                    <p className="text-[10px] font-black uppercase text-slate-400">
+                      {label}
+                    </p>
+                    <p className="text-lg font-black text-slate-800">
+                      {value}
+                    </p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                {bulkBatch.status === "running" && (
+                  <button
+                    type="button"
+                    onClick={pauseBulkBatch}
+                    className="inline-flex h-9 items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 text-[11px] font-black text-amber-700"
+                  >
+                    <Pause size={14} />
+                    Pause after chunk
+                  </button>
+                )}
+
+                {["paused", "cancelled"].includes(
+                  bulkBatch.status,
+                ) &&
+                  bulkBatch.pendingRecordIds.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={resumeBulkBatch}
+                      className="inline-flex h-9 items-center gap-2 rounded-xl bg-emerald-600 px-3 text-[11px] font-black text-white"
+                    >
+                      <Play size={14} />
+                      Resume
+                    </button>
+                  )}
+
+                {bulkBatch.status !== "completed" &&
+                  bulkBatch.pendingRecordIds.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={stopBulkBatch}
+                      className="inline-flex h-9 items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 text-[11px] font-black text-red-700"
+                    >
+                      <XCircle size={14} />
+                      Stop
+                    </button>
+                  )}
+
+                {bulkBatch.failed > 0 &&
+                  bulkBatch.status !== "running" && (
+                    <button
+                      type="button"
+                      onClick={retryFailedBulkBatch}
+                      className="inline-flex h-9 items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 text-[11px] font-black text-blue-700"
+                    >
+                      <RotateCcw size={14} />
+                      Retry failed ({bulkBatch.failed})
+                    </button>
+                  )}
+
+                {bulkPrintableIds().length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void runShipmentAction(
+                        "label",
+                        bulkPrintableIds(),
+                        `bulk-${bulkBatch.id.slice(0, 8)}`,
+                      )
+                    }
+                    disabled={
+                      Boolean(actionBusy) ||
+                      !config?.configuration?.labelReady
+                    }
+                    className="inline-flex h-9 items-center gap-2 rounded-xl bg-slate-800 px-3 text-[11px] font-black text-white disabled:opacity-40"
+                  >
+                    {actionBusy.startsWith("label:") ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : (
+                      <Printer size={14} />
+                    )}
+                    Download/Print Created ({bulkPrintableIds().length})
+                  </button>
+                )}
+
+                {bulkBatch.results.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={downloadBulkBatchCsv}
+                    className="inline-flex h-9 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-[11px] font-black text-slate-700"
+                  >
+                    <Download size={14} />
+                    Result CSV
+                  </button>
+                )}
+
+                {bulkBatch.status !== "running" && (
+                  <button
+                    type="button"
+                    onClick={clearBulkBatch}
+                    className="inline-flex h-9 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-[11px] font-black text-slate-500"
+                  >
+                    <XCircle size={14} />
+                    Clear batch
+                  </button>
+                )}
+              </div>
+
+              {bulkBatch.results.some(
+                (item) => item.outcome === "failed",
+              ) && (
+                <div className="mt-4 max-h-40 overflow-auto rounded-xl border border-red-100 bg-red-50 p-3">
+                  {bulkBatch.results
+                    .filter((item) => item.outcome === "failed")
+                    .slice(-10)
+                    .map((item) => (
+                      <p
+                        key={`${item.recordId}:${item.processedAt}`}
+                        className="text-xs font-bold leading-5 text-red-700"
+                      >
+                        {item.orderNo}: {item.message}
+                      </p>
+                    ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[2200px] text-left text-sm">
+            <thead className="bg-slate-100 text-xs font-black uppercase tracking-wide text-slate-600">
+              <tr>
+                <th className="px-4 py-3">Select</th>
+                <th className="px-4 py-3">Order</th>
+                <th className="px-4 py-3">Customer</th>
+                <th className="px-4 py-3">Mobile</th>
+                <th className="px-4 py-3">AWB</th>
+                <th className="px-4 py-3">Tracking Status</th>
+                <th className="px-4 py-3">Booking Date</th>
+                <th className="px-4 py-3">Last Action</th>
+                <th className="px-4 py-3">Live Location / ETA</th>
+                <th className="px-4 py-3">Age</th>
+                <th className="px-4 py-3">Amounts</th>
+                <th className="px-4 py-3">City / Address</th>
+                <th className="px-4 py-3">Validation</th>
+                <th className="px-4 py-3">Actions</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {filteredOrders.map((order) => {
+                const errorIssues =
+                  order.issues.filter(
+                    (issue) =>
+                      issue.severity === "error",
+                  );
+                const warningIssues =
+                  order.issues.filter(
+                    (issue) =>
+                      issue.severity === "warning",
+                  );
+
+                return (
+                  <tr
+                    key={order.recordId}
+                    className="border-t border-slate-100 align-top hover:bg-slate-50"
+                  >
+                    <td className="px-4 py-4">
+                      <input
+                        type="checkbox"
+                        checked={selected.includes(
+                          order.recordId,
+                        )}
+                        onChange={() =>
+                          toggleOrder(order)
+                        }
+                        disabled={
+                          !order.valid ||
+                          order.canCreateNewAwb ===
+                            false
+                        }
+                        className="h-4 w-4 rounded disabled:opacity-30"
+                      />
+                    </td>
+
+                    <td className="px-4 py-4">
+                      <p className="font-black text-blue-700">
+                        {order.orderNo}
+                      </p>
+                      <p className="mt-1 text-xs font-bold text-slate-400">
+                        {order.store || "Mysmar"}
+                      </p>
+                    </td>
+
+                    <td className="px-4 py-4 font-black text-slate-900">
+                      {order.customerName || "—"}
+                    </td>
+
+                    <td className="px-4 py-4 font-bold text-slate-700">
+                      {order.phone || "—"}
+                    </td>
+
+                    <td className="max-w-[250px] px-4 py-4">
+                      {order.awbNumber ? (
+                        <div className="space-y-1.5">
+                          <p className="font-black text-slate-900">
+                            {order.awbNumber}
+                          </p>
+
+                          <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[10px] font-black text-amber-700">
+                            Existing AWB warning
+                          </span>
+
+                          {(order.previousAwbNumbers ||
+                            []).map((awb) => (
+                            <p
+                              key={awb}
+                              className="text-xs font-bold text-slate-500"
+                            >
+                              Previous: {awb}
+                            </p>
+                          ))}
+
+                          <p className="text-[10px] font-black uppercase text-emerald-700">
+                            New AWB allowed
+                          </p>
+                        </div>
+                      ) : (
+                        <span className="text-xs font-bold text-slate-400">
+                          No AWB
+                        </span>
+                      )}
+                    </td>
+
+                    <td className="px-4 py-4">
+                      <span
+                        className={[
+                          "inline-flex rounded-full border px-2.5 py-1 text-[10px] font-black",
+                          statusBadgeClass(
+                            order.statusGroup,
+                          ),
+                        ].join(" ")}
+                      >
+                        {order.statusGroup}
+                      </span>
+
+                      <p className="mt-2 max-w-[220px] text-xs font-bold leading-5 text-slate-600">
+                        {order.tfmStatus ||
+                          "Status not imported"}
+                      </p>
+
+                      {order.stale && (
+                        <p className="mt-2 inline-flex items-center gap-1 text-xs font-black text-amber-700">
+                          <Clock3 size={13} />
+                          No movement detected
+                        </p>
+                      )}
+                    </td>
+
+                    <td className="px-4 py-4 text-xs font-bold leading-5 text-slate-700">
+                      {formatDate(order.bookingDate)}
+                    </td>
+
+                    <td className="px-4 py-4 text-xs font-bold leading-5 text-slate-700">
+                      <p>
+                        {formatDate(
+                          order.lastActionDate,
+                        )}
+                      </p>
+                      <p className="mt-1 text-[10px] text-slate-400">
+                        Sync:{" "}
+                        {formatDate(order.lastSync)}
+                      </p>
+                    </td>
+
+                    <td className="max-w-[240px] px-4 py-4 text-xs font-bold leading-5 text-slate-700">
+                      <p className="font-black text-slate-900">
+                        {order.tfmLocation || "—"}
+                      </p>
+                      <p className="mt-1 text-[10px] font-bold text-slate-400">
+                        ETA:{" "}
+                        {order.tfmExpectedDelivery
+                          ? formatDate(order.tfmExpectedDelivery)
+                          : "—"}
+                      </p>
+                    </td>
+
+                    <td className="px-4 py-4">
+                      {order.daysSinceLastAction ===
+                      null ? (
+                        <span className="text-xs font-bold text-slate-400">
+                          —
+                        </span>
+                      ) : (
+                        <span
+                          className={[
+                            "inline-flex rounded-full border px-2.5 py-1 text-[10px] font-black",
+                            order.stale
+                              ? "border-amber-200 bg-amber-50 text-amber-700"
+                              : "border-slate-200 bg-slate-50 text-slate-700",
+                          ].join(" ")}
+                        >
+                          {
+                            order.daysSinceLastAction
+                          }{" "}
+                          day
+                          {order.daysSinceLastAction ===
+                          1
+                            ? ""
+                            : "s"}
+                        </span>
+                      )}
+                    </td>
+
+                    <td className="px-4 py-4 text-xs font-bold leading-5 text-slate-700">
+                      <p>
+                        Total: AED {money(order.total)}
+                      </p>
+                      <p>
+                        Advance: AED{" "}
+                        {money(order.advance)}
+                      </p>
+                      <p className="font-black text-slate-950">
+                        COD: AED{" "}
+                        {money(order.codAmount)}
+                      </p>
+                    </td>
+
+                    <td className="max-w-[340px] px-4 py-4 text-xs font-bold leading-5 text-slate-700">
+                      <p className="font-black">
+                        {order.city || "—"}
+                        {order.area
+                          ? ` / ${order.area}`
+                          : ""}
+                      </p>
+
+                      <p className="mt-1 text-slate-500">
+                        {[
+                          order.building,
+                          order.street,
+                          order.address,
+                        ]
+                          .filter(Boolean)
+                          .join(", ") || "—"}
+                      </p>
+                    </td>
+
+                    <td className="max-w-[340px] px-4 py-4">
+                      <div className="space-y-1.5">
+                        {order.valid ? (
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[10px] font-black text-emerald-700">
+                            <CheckCircle2 size={12} />
+                            Valid
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded-full border border-red-200 bg-red-50 px-2.5 py-1 text-[10px] font-black text-red-700">
+                            <XCircle size={12} />
+                            Needs Fix
+                          </span>
+                        )}
+
+                        {errorIssues.map((issue) => (
+                          <p
+                            key={`error:${issue.field}:${issue.message}`}
+                            className="text-xs font-bold leading-5 text-red-700"
+                          >
+                            {issue.field}:{" "}
+                            {issue.message}
+                          </p>
+                        ))}
+
+                        {warningIssues.map((issue) => (
+                          <p
+                            key={`warning:${issue.field}:${issue.message}`}
+                            className="text-xs font-bold leading-5 text-amber-700"
+                          >
+                            {issue.field}:{" "}
+                            {issue.message}
+                          </p>
+                        ))}
+                      </div>
+                    </td>
+
+                    <td className="px-4 py-4">
+                      <div className="flex min-w-[170px] flex-col gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void runShipmentAction(
+                              "create",
+                              [order.recordId],
+                            )
+                          }
+                          disabled={
+                            !order.valid ||
+                            Boolean(actionBusy) ||
+                            !config?.configuration?.bookingReady
+                          }
+                          className="inline-flex h-9 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-3 text-[11px] font-black text-white disabled:opacity-35"
+                        >
+                          {actionBusy === `create:${order.recordId}` ? (
+                            <Loader2 size={14} className="animate-spin" />
+                          ) : (
+                            <Send size={14} />
+                          )}
+                          Create AWB
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void runShipmentAction(
+                              "track",
+                              [order.recordId],
+                            )
+                          }
+                          disabled={
+                            !Boolean(order.awbNumber || order.shipmentId) ||
+                            Boolean(actionBusy) ||
+                            !config?.configuration?.trackingReady
+                          }
+                          className="inline-flex h-9 items-center justify-center gap-2 rounded-xl bg-blue-600 px-3 text-[11px] font-black text-white disabled:opacity-35"
+                        >
+                          {actionBusy === `track:${order.recordId}` ? (
+                            <Loader2 size={14} className="animate-spin" />
+                          ) : (
+                            <Radio size={14} />
+                          )}
+                          Live Track
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void runShipmentAction(
+                              "label",
+                              [order.recordId],
+                              order.orderNo,
+                            )
+                          }
+                          disabled={
+                            !Boolean(order.awbNumber || order.shipmentId) ||
+                            Boolean(actionBusy) ||
+                            !config?.configuration?.labelReady
+                          }
+                          className="inline-flex h-9 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-[11px] font-black text-slate-700 disabled:opacity-35"
+                        >
+                          {actionBusy === `label:${order.recordId}` ? (
+                            <Loader2 size={14} className="animate-spin" />
+                          ) : (
+                            <Printer size={14} />
+                          )}
+                          Label
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void runShipmentAction(
+                              "cancel",
+                              [order.recordId],
+                            )
+                          }
+                          disabled={
+                            !Boolean(order.awbNumber || order.shipmentId) ||
+                            ["Delivered", "Returned", "Cancelled"].includes(
+                              order.statusGroup,
+                            ) ||
+                            Boolean(actionBusy) ||
+                            !config?.configuration?.cancellationReady
+                          }
+                          className="inline-flex h-9 items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 text-[11px] font-black text-red-700 disabled:opacity-35"
+                        >
+                          {actionBusy === `cancel:${order.recordId}` ? (
+                            <Loader2 size={14} className="animate-spin" />
+                          ) : (
+                            <Ban size={14} />
+                          )}
+                          Cancel
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+
+              {!loading &&
+                filteredOrders.length === 0 && (
+                  <tr>
+                    <td
+                      colSpan={14}
+                      className="px-4 py-12 text-center font-bold text-slate-500"
+                    >
+                      No TFM records match the selected
+                      filters.
+                    </td>
+                  </tr>
+                )}
+
+              {loading && (
+                <tr>
+                  <td
+                    colSpan={14}
+                    className="px-4 py-12 text-center"
+                  >
+                    <Loader2
+                      size={26}
+                      className="mx-auto animate-spin text-blue-600"
+                    />
+                    <p className="mt-2 font-black text-blue-600">
+                      Loading TFM status records...
+                    </p>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function InfoValue({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div>
+      <p className="text-[10px] font-black uppercase text-emerald-600">
+        {label}
+      </p>
+      <p className="mt-1 text-xs font-black text-emerald-900">
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function StatCard({
+  label,
+  value,
+  icon: Icon,
+}: {
+  label: string;
+  value: number;
+  icon: typeof Truck;
+}) {
+  return (
+    <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-xs font-black uppercase tracking-wide text-slate-500">
+            {label}
+          </p>
+          <p className="mt-2 text-3xl font-black text-slate-950">
+            {value}
+          </p>
+        </div>
+
+        <div className="grid h-12 w-12 place-items-center rounded-2xl bg-blue-50 text-blue-700">
+          <Icon size={22} />
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -4,6 +4,10 @@ import {
   airtableUrl,
   getCurrentAirtableBase,
 } from "@/lib/airtable";
+import {
+  resolveInvoiceIdsForOrderEntryRecords,
+  syncInvoiceInstockStatuses,
+} from "@/lib/order-instock-sync";
 
 type AirtableSchemaField = {
   id: string;
@@ -77,6 +81,16 @@ function valueForField(
   }
 
   return text;
+}
+
+function isYesValue(value: unknown) {
+  if (value === true || value === 1) return true;
+
+  return ["yes", "true", "1", "checked", "received"].includes(
+    String(value ?? "")
+      .trim()
+      .toLowerCase()
+  );
 }
 
 async function loadOrderEntrySchema({
@@ -272,6 +286,11 @@ export async function PATCH(req: NextRequest) {
         "Warehouse Received",
         "instock",
       ]),
+      receivedInUae: findWritableField(schemaFields, [
+        "Received In UAE",
+        "Received in UAE",
+        "received_in_uae",
+      ]),
       billNo: findWritableField(schemaFields, [
         "bill_no",
         "Bill No",
@@ -328,6 +347,16 @@ export async function PATCH(req: NextRequest) {
           fieldMap.receivedWh,
           item.receivedWh
         );
+
+        if (
+          isYesValue(item.receivedWh) &&
+          fieldMap.receivedInUae
+        ) {
+          fields[fieldMap.receivedInUae.name] = valueForField(
+            fieldMap.receivedInUae,
+            "Yes"
+          );
+        }
       }
 
       if (fieldMap.billNo && item.billNo !== undefined) {
@@ -433,6 +462,43 @@ export async function PATCH(req: NextRequest) {
       updatedRecords.push(...(data?.records || []));
     }
 
+    const invoiceTableName =
+      orderEntryTable === "DQ Order Entry"
+        ? "DQ Invoice"
+        : airtable.tables.invoice || "BS Invoice";
+
+    let instockSync: unknown = null;
+
+    try {
+      const invoiceIds =
+        await resolveInvoiceIdsForOrderEntryRecords({
+          baseId: airtable.baseId,
+          token: airtable.token,
+          orderEntryTableName: orderEntryTable,
+          invoiceTableName,
+          recordIds: items.map((item: any) =>
+            String(item.id || "")
+          ),
+        });
+
+      instockSync = await syncInvoiceInstockStatuses({
+        baseId: airtable.baseId,
+        token: airtable.token,
+        orderEntryTableName: orderEntryTable,
+        invoiceTableName,
+        invoiceIds,
+      });
+    } catch (syncError) {
+      console.error("Invoice Instock sync after item update failed:", syncError);
+      instockSync = {
+        success: false,
+        message:
+          syncError instanceof Error
+            ? syncError.message
+            : "Invoice Instock sync failed",
+      };
+    }
+
     return NextResponse.json({
       success: true,
       tableName: orderEntryTable,
@@ -440,6 +506,7 @@ export async function PATCH(req: NextRequest) {
         quantity: fieldMap.quantity?.name || null,
         supplier: fieldMap.supplier?.name || null,
         receivedWh: fieldMap.receivedWh?.name || null,
+        receivedInUae: fieldMap.receivedInUae?.name || null,
         billNo: fieldMap.billNo?.name || null,
         size: fieldMap.size?.name || null,
         singlePrice: fieldMap.singlePrice?.name || null,
@@ -447,6 +514,7 @@ export async function PATCH(req: NextRequest) {
         offerPrice: fieldMap.offerPrice?.name || null,
       },
       records: updatedRecords,
+      instockSync,
     });
   } catch (error) {
     console.error("Order Items Update Failed:", error);

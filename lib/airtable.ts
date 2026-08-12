@@ -1,5 +1,17 @@
+import {
+  auditedFetch as fetch,
+  installGlobalAirtableAudit,
+} from "@/lib/audit-airtable-fetch";
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
+
+// API routes across the ERP import this central Airtable module.
+// Install the audit wrapper here as a runtime safety net in addition
+// to Next.js instrumentation.ts, so direct Airtable fetch() mutations
+// are still captured during local dev, Turbopack reloads, and Vercel.
+if (process.env.NEXT_RUNTIME !== "edge") {
+  installGlobalAirtableAudit();
+}
 
 export type CurrentAirtableBase = {
   baseName: string;
@@ -63,6 +75,12 @@ export async function getCurrentAirtableBase(): Promise<CurrentAirtableBase> {
   if (!token) {
     throw new Error("Airtable token missing for selected base");
   }
+
+  console.log("===== AIRTABLE DEBUG =====");
+  console.log("Base:", selectedBase.baseName);
+  console.log("Base ID:", selectedBase.baseId);
+  console.log("Token Prefix:", token.substring(0, 12));
+  console.log("Tables:", tables);
 
   return {
     baseName: selectedBase.baseName,
@@ -154,7 +172,13 @@ export async function airtableFetch({
   if (!response.ok) {
     throw {
       status: response.status,
-      message: data?.error?.message || "Airtable request failed",
+      message:
+        (typeof data?.error === "string"
+          ? data.error
+          : data?.error?.message ||
+            data?.error?.type ||
+            data?.message) ||
+        `Airtable request failed (HTTP ${response.status})`,
       error: data,
     };
   }
@@ -225,6 +249,7 @@ type CustomerFieldMap = {
   address?: string;
   area?: string;
   city?: string;
+  googleMapLocation?: string;
 };
 
 const customerFieldCache = new Map<string, CustomerFieldMap>();
@@ -368,6 +393,7 @@ async function getCustomerFieldMap(
     ]),
     area: firstMatchingField(fields, ["Area Name", "Area", "Location"]),
     city: firstMatchingField(fields, ["City Name", "City"]),
+    googleMapLocation: firstMatchingField(fields, ["Google Map Location"]),
   };
 
   if (!map.contact) throw new Error(`Customer contact field not found in table: ${tableName}`);
@@ -431,6 +457,7 @@ export async function createCustomer(input: {
   address?: string;
   areaName?: string;
   cityName?: string;
+  googleMapLocation?: string;
 }) {
   const airtable = await getCurrentAirtableBase();
   if (!airtable.canEdit) {
@@ -471,6 +498,20 @@ export async function createCustomer(input: {
   if (fieldMap.address) fields[fieldMap.address] = input.address || "";
   if (fieldMap.area) fields[fieldMap.area] = input.areaName || "";
   if (fieldMap.city) fields[fieldMap.city] = input.cityName || "";
+
+  const normalizedBaseName = airtable.baseName.trim().toLowerCase();
+  const isI5qDqBase =
+    normalizedBaseName.includes("i5q") ||
+    /(^|[^a-z0-9])dq([^a-z0-9]|$)/.test(normalizedBaseName);
+
+  const supportsGoogleMapLocation =
+    (normalizedBaseName.includes("fab") &&
+      normalizedBaseName.includes("doha")) ||
+    isI5qDqBase;
+
+  if (supportsGoogleMapLocation && fieldMap.googleMapLocation) {
+    fields[fieldMap.googleMapLocation] = input.googleMapLocation || "";
+  }
 
   return airtableFetch({
     baseId: airtable.baseId,

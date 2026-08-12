@@ -1,0 +1,412 @@
+import { NextRequest, NextResponse } from "next/server";
+import {
+  airtableHeaders,
+  airtableUrl,
+  getCurrentAirtableBase,
+} from "@/lib/airtable";
+
+type SchemaField = {
+  id: string;
+  name: string;
+  type: string;
+  options?: {
+    linkedTableId?: string;
+    choices?: Array<{ name: string }>;
+  };
+};
+
+type SchemaTable = {
+  id: string;
+  name: string;
+  primaryFieldId?: string;
+  fields: SchemaField[];
+};
+
+const schemaCache = new Map<string, SchemaTable[]>();
+
+function getRole(airtable: unknown): string {
+  const source = airtable as Record<string, any>;
+  return String(
+    source?.role ??
+      source?.userRole ??
+      source?.accountRole ??
+      source?.user?.role ??
+      source?.session?.role ??
+      source?.permissions?.role ??
+      ""
+  )
+    .trim()
+    .toLowerCase();
+}
+
+function isSupplierRole(airtable: unknown) {
+  return getRole(airtable).includes("supplier");
+}
+
+function first(value: unknown): unknown {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function text(value: unknown): string {
+  const resolved = first(value);
+  if (resolved == null) return "";
+  if (typeof resolved === "object") {
+    const objectValue = resolved as Record<string, unknown>;
+    return String(objectValue.name ?? objectValue.value ?? objectValue.text ?? "");
+  }
+  return String(resolved);
+}
+
+function numeric(value: unknown): number {
+  const parsed = Number(first(value));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function findField(fields: SchemaField[], candidates: string[]) {
+  const lookup = new Map(fields.map((field) => [field.name.trim().toLowerCase(), field]));
+  for (const candidate of candidates) {
+    const found = lookup.get(candidate.trim().toLowerCase());
+    if (found) return found;
+  }
+  return undefined;
+}
+
+async function getSchema(baseId: string, token: string) {
+  const cached = schemaCache.get(baseId);
+  if (cached) return cached;
+
+  const response = await fetch(
+    `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(baseId)}/tables`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store",
+    }
+  );
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data?.error?.message || "Unable to load Airtable schema");
+  }
+  const tables = (data.tables || []) as SchemaTable[];
+  schemaCache.set(baseId, tables);
+  return tables;
+}
+
+async function resolveLinkedNames({
+  baseId,
+  token,
+  table,
+  recordIds,
+}: {
+  baseId: string;
+  token: string;
+  table: SchemaTable;
+  recordIds: string[];
+}) {
+  const uniqueIds = Array.from(new Set(recordIds.filter((id) => id.startsWith("rec"))));
+  const result = new Map<string, string>();
+  if (!uniqueIds.length) return result;
+
+  const primaryField =
+    table.fields.find((field) => field.id === table.primaryFieldId)?.name ||
+    table.fields[0]?.name;
+  if (!primaryField) return result;
+
+  for (let index = 0; index < uniqueIds.length; index += 40) {
+    const batch = uniqueIds.slice(index, index + 40);
+    const formula =
+      batch.length === 1
+        ? `RECORD_ID()='${batch[0]}'`
+        : `OR(${batch.map((id) => `RECORD_ID()='${id}'`).join(",")})`;
+    const params = new URLSearchParams({ pageSize: "100", filterByFormula: formula });
+    const response = await fetch(airtableUrl(baseId, table.name, params), {
+      headers: airtableHeaders(token),
+      cache: "no-store",
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data?.error?.message || `Unable to resolve ${table.name}`);
+    }
+    for (const record of data.records || []) {
+      result.set(record.id, text(record.fields?.[primaryField]));
+    }
+  }
+  return result;
+}
+
+
+const BS_BASE_ID = "app2hjpuQoeEL1Rn2";
+const BS_ORDER_ENTRY_TABLE = "BS Order Entry";
+
+async function loadBsSupplierChoices(token: string) {
+  const schema = await getSchema(BS_BASE_ID, token);
+  const table = schema.find((item) => item.name === BS_ORDER_ENTRY_TABLE);
+
+  if (!table) {
+    throw new Error("BS Order Entry table not found while loading supplier list");
+  }
+
+  const supplierField = findField(table.fields || [], [
+    "Supplier",
+    "Purchase Supplier",
+  ]);
+
+  if (!supplierField) {
+    throw new Error("Supplier field not found in BS Order Entry");
+  }
+
+  return Array.from(
+    new Set(
+      (supplierField.options?.choices || [])
+        .map((choice) => String(choice.name || "").trim())
+        .filter(Boolean)
+    )
+  ).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+}
+
+export async function GET(req: NextRequest) {
+  try {
+    const airtable = await getCurrentAirtableBase();
+    if (isSupplierRole(airtable)) {
+      return NextResponse.json(
+        { success: false, message: "Supplier accounts cannot access Quick Edit" },
+        { status: 403 }
+      );
+    }
+
+    if (!airtable.canView) {
+      return NextResponse.json(
+        { success: false, message: "You do not have permission to view order items" },
+        { status: 403 }
+      );
+    }
+
+    const schema = await getSchema(airtable.baseId, airtable.token);
+    const tableName = airtable.tables?.orderEntry || "BS Order Entry";
+    const table = schema.find((item) => item.name === tableName);
+    if (!table) {
+      return NextResponse.json(
+        { success: false, message: `Order Entry table not found: ${tableName}` },
+        { status: 404 }
+      );
+    }
+
+    const fields = table.fields || [];
+    const fieldMap = {
+      orderNo: findField(fields, [
+        "Order Number",
+        "Order No.",
+        "Order No",
+        "order no.",
+        "order no",
+        "order_no",
+        "Invoice No",
+      ]),
+      sku: findField(fields, ["Item Code", "SKU", "sku", "Product SKU", "Product"]),
+      image: findField(fields, ["image", "Image", "Product Image"]),
+      quantity: findField(fields, ["quantity", "Quantity", "Qty", "QTY"]),
+      supplier: findField(fields, ["Supplier", "Purchase Supplier"]),
+      supplierCode: findField(fields, ["Supplier Code"]),
+      billNo: findField(fields, ["bill_no", "Bill No", "Bill No.", "Bill Number"]),
+      dispatchedFromIndia: findField(fields, [
+        "received_in_wh_1",
+        "Received in WH 1",
+        "Received In WH 1",
+        "Warehouse Received",
+      ]),
+      receivedInUae: findField(fields, [
+        "Received In UAE",
+        "Received in UAE",
+        "received_in_uae",
+      ]),
+      soldOut: findField(fields, ["Sold Out", "Supplier Activity"]),
+      date: findField(fields, ["date", "Date", "created Date", "Created Date"]),
+      status: findField(fields, ["Order_status", "order_status", "Order Status"]),
+      store: findField(fields, ["Store", "Select Store"]),
+    };
+
+    const { searchParams } = new URL(req.url);
+    const offset = (searchParams.get("offset") || "").trim();
+    const q = (searchParams.get("q") || "").trim().toLowerCase();
+    const requestedSize = Math.min(
+      Math.max(Number(searchParams.get("pageSize") || (offset ? 100 : 300)), 10),
+      offset ? 100 : 300
+    );
+
+    const records: any[] = [];
+    let currentOffset = offset;
+    let nextOffset = "";
+    const pagesToLoad = offset ? 1 : Math.ceil(requestedSize / 100);
+
+    for (let page = 0; page < pagesToLoad; page += 1) {
+      const remaining = requestedSize - records.length;
+      if (remaining <= 0) break;
+
+      const params = new URLSearchParams({
+        pageSize: String(Math.min(100, remaining)),
+      });
+
+      if (fieldMap.status) {
+        params.set(
+          "filterByFormula",
+          `{${fieldMap.status.name}}="Order Received"`
+        );
+      }
+
+      if (currentOffset) params.set("offset", currentOffset);
+      if (fieldMap.date) {
+        params.set("sort[0][field]", fieldMap.date.name);
+        params.set("sort[0][direction]", "desc");
+      }
+
+      const response = await fetch(airtableUrl(airtable.baseId, tableName, params), {
+        headers: airtableHeaders(airtable.token),
+        cache: "no-store",
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        return NextResponse.json(
+          { success: false, message: data?.error?.message || "Unable to load order items" },
+          { status: response.status }
+        );
+      }
+
+      records.push(...(data.records || []));
+      nextOffset = data.offset || "";
+      currentOffset = nextOffset;
+
+      if (!nextOffset) break;
+    }
+    const orderNoSchemaField = fieldMap.orderNo;
+    let orderNoNames = new Map<string, string>();
+    if (
+      orderNoSchemaField?.type === "multipleRecordLinks" &&
+      orderNoSchemaField.options?.linkedTableId
+    ) {
+      const invoiceTable = schema.find(
+        (item) => item.id === orderNoSchemaField.options?.linkedTableId
+      );
+
+      if (invoiceTable) {
+        const ids = records.flatMap((record: any) => {
+          const raw = record.fields?.[orderNoSchemaField.name];
+          return Array.isArray(raw) ? raw : raw ? [raw] : [];
+        });
+
+        orderNoNames = await resolveLinkedNames({
+          baseId: airtable.baseId,
+          token: airtable.token,
+          table: invoiceTable,
+          recordIds: ids,
+        });
+      }
+    }
+
+    const skuSchemaField = fieldMap.sku;
+    let skuNames = new Map<string, string>();
+    if (skuSchemaField?.type === "multipleRecordLinks" && skuSchemaField.options?.linkedTableId) {
+      const productTable = schema.find((item) => item.id === skuSchemaField.options?.linkedTableId);
+      if (productTable) {
+        const ids = records.flatMap((record: any) => {
+          const raw = record.fields?.[skuSchemaField.name];
+          return Array.isArray(raw) ? raw : raw ? [raw] : [];
+        });
+        skuNames = await resolveLinkedNames({
+          baseId: airtable.baseId,
+          token: airtable.token,
+          table: productTable,
+          recordIds: ids,
+        });
+      }
+    }
+
+    const normalized = records
+      .map((record: any) => {
+        const source = record.fields || {};
+        const rawOrderNo = fieldMap.orderNo ? source[fieldMap.orderNo.name] : "";
+        const orderNoId = text(rawOrderNo);
+        const rawSku = fieldMap.sku ? source[fieldMap.sku.name] : "";
+        const skuId = text(rawSku);
+        const item = {
+          id: record.id,
+          orderNo: orderNoNames.get(orderNoId) || text(rawOrderNo),
+          sku: skuNames.get(skuId) || text(rawSku),
+          image: fieldMap.image ? source[fieldMap.image.name] || [] : [],
+          quantity: fieldMap.quantity ? numeric(source[fieldMap.quantity.name]) : 0,
+          supplier: fieldMap.supplier ? text(source[fieldMap.supplier.name]) : "",
+          supplierCode: fieldMap.supplierCode ? text(source[fieldMap.supplierCode.name]) : "",
+          billNo: fieldMap.billNo ? text(source[fieldMap.billNo.name]) : "",
+          dispatchedFromIndia: fieldMap.dispatchedFromIndia
+            ? text(source[fieldMap.dispatchedFromIndia.name])
+            : "",
+          receivedInUae: fieldMap.receivedInUae
+            ? text(source[fieldMap.receivedInUae.name])
+            : "",
+          soldOut: fieldMap.soldOut ? text(source[fieldMap.soldOut.name]) : "",
+          date: fieldMap.date ? text(source[fieldMap.date.name]) : "",
+          status: fieldMap.status ? text(source[fieldMap.status.name]) : "",
+          store: fieldMap.store ? text(source[fieldMap.store.name]) : "",
+        };
+        return item;
+      })
+      .filter((item: any) => {
+        if (!q) return true;
+        return [item.orderNo, item.sku, item.supplier, item.supplierCode, item.billNo]
+          .join(" ")
+          .toLowerCase()
+          .includes(q);
+      });
+
+    const supplierEnabled =
+      tableName === "BS Order Entry" ||
+      airtable.baseName?.toLowerCase().includes("non stock");
+
+    const supplierChoices =
+      supplierEnabled && fieldMap.supplier
+        ? await loadBsSupplierChoices(airtable.token)
+        : [];
+
+    const editableFields = [
+      ["orderNo", fieldMap.orderNo],
+      ["quantity", fieldMap.quantity],
+      ["supplier", fieldMap.supplier],
+      ["billNo", fieldMap.billNo],
+      ["dispatchedFromIndia", fieldMap.dispatchedFromIndia],
+      ["receivedInUae", fieldMap.receivedInUae],
+      ["soldOut", fieldMap.soldOut],
+    ]
+      .filter(([, field]) => Boolean(field))
+      .map(([key, field]) => {
+        const schemaField = field as SchemaField;
+        return {
+          key,
+          airtableName: schemaField.name,
+          type:
+            key === "orderNo"
+              ? "text"
+              : key === "supplier" && supplierEnabled
+                ? "singleSelect"
+                : schemaField.type,
+          choices:
+            key === "supplier" && supplierEnabled
+              ? supplierChoices
+              : schemaField.options?.choices?.map((choice) => choice.name) || [],
+        };
+      });
+
+    return NextResponse.json({
+      success: true,
+      baseName: airtable.baseName,
+      tableName,
+      items: normalized,
+      nextOffset,
+      editableFields,
+    });
+  } catch (error) {
+    console.error("Quick edit list failed:", error);
+    return NextResponse.json(
+      { success: false, message: error instanceof Error ? error.message : "Quick edit list failed" },
+      { status: 500 }
+    );
+  }
+}

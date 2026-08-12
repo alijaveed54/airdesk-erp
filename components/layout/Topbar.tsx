@@ -118,7 +118,7 @@ export default function Topbar() {
   const isSupplier = user?.role === "Supplier";
 
   return (
-    <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/80 px-4 py-4 backdrop-blur-xl sm:px-6 lg:px-8">
+    <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/80 pl-16 pr-4 py-4 backdrop-blur-xl sm:pl-20 sm:pr-6 lg:px-8">
       <div className="flex items-center justify-between gap-4">
         <div className="relative hidden w-full max-w-md md:block">
           <Search

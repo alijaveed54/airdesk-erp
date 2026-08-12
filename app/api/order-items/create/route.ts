@@ -4,6 +4,9 @@ import {
   airtableUrl,
   getCurrentAirtableBase,
 } from "@/lib/airtable";
+import {
+  syncInvoiceInstockStatuses,
+} from "@/lib/order-instock-sync";
 
 type Field = {
   id: string;
@@ -285,7 +288,22 @@ export async function POST(req: NextRequest) {
 
     const warehouseField = pickWritableField(
       orderEntryTable.fields,
-      ["received_in_wh_1", "Received in WH 1"]
+      [
+        "received_in_wh_1",
+        "Received in WH 1",
+        "Received In WH 1",
+        "Received WH 1",
+        "Warehouse Received",
+      ]
+    );
+
+    const receivedInUaeField = pickWritableField(
+      orderEntryTable.fields,
+      [
+        "Received In UAE",
+        "Received in UAE",
+        "received_in_uae",
+      ]
     );
 
     const sizeField = pickWritableField(
@@ -370,17 +388,21 @@ export async function POST(req: NextRequest) {
 
       if (
         supplierField &&
-        item.purchaseSupplier
+        item.purchaseSupplier &&
+        !item.warehouse
       ) {
         fields[supplierField.name] =
           item.purchaseSupplier;
       }
 
-      if (
-        warehouseField &&
-        item.warehouse
-      ) {
-        fields[warehouseField.name] = "Yes";
+      if (item.warehouse) {
+        if (warehouseField) {
+          fields[warehouseField.name] = "Yes";
+        }
+
+        if (receivedInUaeField) {
+          fields[receivedInUaeField.name] = "Yes";
+        }
       }
 
       if (
@@ -460,12 +482,34 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    let instockSync: unknown = null;
+
+    try {
+      instockSync = await syncInvoiceInstockStatuses({
+        baseId: airtable.baseId,
+        token: airtable.token,
+        orderEntryTableName,
+        invoiceTableName,
+        invoiceIds: [invoiceId],
+      });
+    } catch (syncError) {
+      console.error("Invoice Instock sync after item create failed:", syncError);
+      instockSync = {
+        success: false,
+        message:
+          syncError instanceof Error
+            ? syncError.message
+            : "Invoice Instock sync failed",
+      };
+    }
+
     return NextResponse.json({
       success: true,
       records: data.records || [],
       invoiceTable: invoiceTableName,
       orderEntryTable: orderEntryTableName,
       productTable: productTable.name,
+      instockSync,
     });
   } catch (error) {
     return NextResponse.json(

@@ -56,6 +56,7 @@ export default function DQStockReceiveForm() {
   const [newSize, setNewSize] = useState("");
   const [newPrice, setNewPrice] = useState("");
   const [newQuantity, setNewQuantity] = useState(1);
+  const [newCategory, setNewCategory] = useState("");
   const [creatingProduct, setCreatingProduct] =
     useState(false);
 

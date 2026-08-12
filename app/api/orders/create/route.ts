@@ -30,6 +30,7 @@ type OrderEntryFieldMap = {
   singlePrice?: string;
   packPrice?: string;
   receivedWh?: string;
+  receivedInUae?: string;
   supplier?: string;
 };
 
@@ -38,6 +39,7 @@ type InvoiceFieldMap = {
   discount?: string;
   shipping?: string;
   vat?: string;
+  totalAdjustment?: string;
   orderNote?: string;
   replacement?: string;
   returnItemsValue?: string;
@@ -158,6 +160,14 @@ async function getInvoiceFieldMap({
       "Delivery Charges",
     ]),
     vat: findSchemaField(fields, ["vat", "VAT"]),
+    totalAdjustment: findSchemaField(fields, [
+      "Total Adjustment",
+      "total adjustment",
+      "TotalAdjustment",
+      "total_adjustment",
+      "Adjustment",
+      "Adjustment Amount",
+    ]),
     orderNote: findSchemaField(fields, [
       "Order Note",
       "order_note",
@@ -273,8 +283,14 @@ async function getOrderEntryFieldMap({
     receivedWh: findSchemaField(fields, [
       "received_in_wh_1",
       "Received in WH 1",
+      "Received In WH 1",
       "Received WH 1",
       "Warehouse Received",
+    ]),
+    receivedInUae: findSchemaField(fields, [
+      "Received In UAE",
+      "Received in UAE",
+      "received_in_uae",
     ]),
     supplier: findSchemaField(fields, [
       "Supplier",
@@ -342,6 +358,7 @@ export async function POST(request: Request) {
       discount,
       shipping,
       vat,
+      totalAdjustment,
       orderNote,
       replacement,
       returnOrderValue,
@@ -450,6 +467,11 @@ export async function POST(request: Request) {
         : Number(vat) || 0;
     }
 
+    if (invoiceFieldMap.totalAdjustment) {
+      invoiceFields[invoiceFieldMap.totalAdjustment] =
+        Number(totalAdjustment) || 0;
+    }
+
     if (invoiceFieldMap.orderNote) {
       invoiceFields[invoiceFieldMap.orderNote] = orderNote || "";
     }
@@ -522,9 +544,15 @@ export async function POST(request: Request) {
             Number(item.packPrice) || 0;
         }
       } else {
-        if (item.warehouse && orderEntryFieldMap.receivedWh) {
-          entryFields[orderEntryFieldMap.receivedWh] = "Yes";
-        } else if (!item.warehouse && orderEntryFieldMap.supplier) {
+        if (item.warehouse) {
+          if (orderEntryFieldMap.receivedWh) {
+            entryFields[orderEntryFieldMap.receivedWh] = "Yes";
+          }
+
+          if (orderEntryFieldMap.receivedInUae) {
+            entryFields[orderEntryFieldMap.receivedInUae] = "Yes";
+          }
+        } else if (orderEntryFieldMap.supplier) {
           entryFields[orderEntryFieldMap.supplier] =
             item.purchaseSupplier || "";
         }

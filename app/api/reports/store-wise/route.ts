@@ -36,6 +36,7 @@ type StoreRow = {
   returned: number;
   returnedValue: number;
   cancelled: number;
+  cancelledValue: number;
 };
 
 function normalize(value: unknown) {
@@ -238,6 +239,7 @@ function emptyStoreRow(store: string): StoreRow {
     returned: 0,
     returnedValue: 0,
     cancelled: 0,
+    cancelledValue: 0,
   };
 }
 
@@ -279,9 +281,7 @@ export async function GET(request: Request) {
       Boolean(session.superAdmin);
 
     const selectedBaseId =
-      session.selectedBase?.baseId ||
-      session.selectedBaseId ||
-      "";
+      session.selectedBase?.baseId || "";
 
     const selectedBase =
       operationalBases.find(
@@ -331,6 +331,7 @@ export async function GET(request: Request) {
         returned: number;
         returnedValue: number;
         cancelled: number;
+        cancelledValue: number;
       };
     }> = [];
 
@@ -466,6 +467,7 @@ export async function GET(request: Request) {
             row.returnedValue += value;
           } else if (status.includes("cancel")) {
             row.cancelled += 1;
+            row.cancelledValue += value;
           } else if (
             status === "" ||
             status.includes("order received") ||
@@ -494,6 +496,7 @@ export async function GET(request: Request) {
             total.returned += row.returned;
             total.returnedValue += row.returnedValue;
             total.cancelled += row.cancelled;
+            total.cancelledValue += row.cancelledValue;
             return total;
           },
           {
@@ -508,6 +511,7 @@ export async function GET(request: Request) {
             returned: 0,
             returnedValue: 0,
             cancelled: 0,
+            cancelledValue: 0,
           }
         );
 
@@ -541,6 +545,7 @@ export async function GET(request: Request) {
         total.returned += report.summary.returned;
         total.returnedValue += report.summary.returnedValue;
         total.cancelled += report.summary.cancelled;
+        total.cancelledValue += report.summary.cancelledValue;
         return total;
       },
       {
@@ -555,6 +560,7 @@ export async function GET(request: Request) {
         returned: 0,
         returnedValue: 0,
         cancelled: 0,
+        cancelledValue: 0,
       }
     );
 

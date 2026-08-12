@@ -163,7 +163,10 @@ export async function POST(request: Request) {
           canDelete: getBool(fields["Can Delete"]),
         };
       })
-      .filter((permission): permission is BasePermission => Boolean(permission));
+      .filter(
+        (permission: BasePermission | null): permission is BasePermission =>
+          permission !== null
+      );
 
     if (!permissions.length) {
       return NextResponse.json({ success: false, message: "No active base access found" }, { status: 403 });

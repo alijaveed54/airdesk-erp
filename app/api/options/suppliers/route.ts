@@ -1,47 +1,63 @@
 import { NextResponse } from "next/server";
-
-const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN;
-const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
+import { getCurrentAirtableBase } from "@/lib/airtable";
 
 export async function GET() {
   try {
+    const airtable = await getCurrentAirtableBase();
+
+    if (!airtable?.token || !airtable?.baseId) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Airtable configuration missing",
+        },
+        { status: 500 }
+      );
+    }
+
     const response = await fetch(
-      `https://api.airtable.com/v0/meta/bases/${AIRTABLE_BASE_ID}/tables`,
+      `https://api.airtable.com/v0/meta/bases/${airtable.baseId}/tables`,
       {
         headers: {
-          Authorization: `Bearer ${AIRTABLE_TOKEN}`,
+          Authorization: `Bearer ${airtable.token}`,
         },
         cache: "no-store",
       }
     );
 
     if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Airtable Metadata Error: ${response.status} ${errorText}`);
+      const error = await response.text();
+      throw new Error(`Airtable Metadata Error: ${response.status} ${error}`);
     }
 
     const data = await response.json();
 
     const table = data.tables.find(
-      (table: any) => table.name === "BS Order Entry"
+      (t: any) => t.name === airtable.tables?.orderEntry || t.name === "BS Order Entry"
     );
 
     const field = table?.fields?.find(
-      (field: any) => field.name === "Supplier"
+      (f: any) => f.name === "Supplier"
     );
 
-    const options =
+    const suppliers =
       field?.options?.choices?.map((choice: any) => choice.name) || [];
 
     return NextResponse.json({
       success: true,
-      options,
+      suppliers,
+      options: suppliers,
     });
   } catch (error) {
+    console.error("Supplier options error:", error);
+
     return NextResponse.json(
       {
         success: false,
-        message: error instanceof Error ? error.message : "Unknown error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Unable to load suppliers",
       },
       { status: 500 }
     );

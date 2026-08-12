@@ -146,7 +146,14 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
 
-    const { contactNo, customerName, address, areaName, cityName } = body;
+    const {
+      contactNo,
+      customerName,
+      address,
+      areaName,
+      cityName,
+      googleMapLocation,
+    } = body;
 
     if (!String(contactNo ?? "").trim() || !String(customerName ?? "").trim()) {
       return NextResponse.json(
@@ -164,6 +171,7 @@ export async function POST(request: Request) {
       address: String(address ?? "").trim(),
       areaName: String(areaName ?? "").trim(),
       cityName: String(cityName ?? "").trim(),
+      googleMapLocation: String(googleMapLocation ?? "").trim(),
     });
 
     return NextResponse.json({

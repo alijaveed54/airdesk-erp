@@ -1,0 +1,1276 @@
+// TFM_PRINT_RESPONSE_COMPAT_V6
+// TFM_BULK_PRINT_NATIVE_V7
+import {
+  getTfmAllowLiveRequests,
+  getTfmApiBaseUrl,
+  getTfmEndpointConfiguration,
+  getTfmExtraHeaders,
+  getTfmLabelAllowedHosts,
+  getTfmRequestTimeoutMs,
+  getTfmShipmentDefaults,
+  joinTfmUrl,
+  type TfmEndpointConfiguration,
+  type TfmOperation,
+} from "@/lib/tfm";
+import {
+  clearTfmAuthCache,
+  getTfmAuthorizationContext,
+} from "@/lib/tfm-auth";
+import { trackTfmShipmentPublic } from "@/lib/tfm-public-tracker";
+
+type JsonRecord = Record<string, unknown>;
+type TemplateContext = Record<string, unknown>;
+
+export type TfmShipmentInput = {
+  recordId: string;
+  orderNo: string;
+  customerName: string;
+  phone: string;
+  email: string;
+  address: string;
+  city: string;
+  area: string;
+  building: string;
+  street: string;
+  country: string;
+  latitude: string;
+  longitude: string;
+  store: string;
+  note: string;
+  content: string;
+  deliveryServiceCode: string;
+  pieces: number;
+  totalWeight: number;
+  totalVolumeWeight: number;
+  total: number;
+  advance: number;
+  codAmount: number;
+  paymentType: "COD" | "Prepaid";
+  awbNumber: string;
+  shipmentId: string;
+};
+
+export type TfmCreateResult = {
+  awbNumber: string;
+  shipmentId: string;
+  status: string;
+  bookingDate: string;
+  lastActionDate: string;
+  raw: unknown;
+};
+
+export type TfmTrackResult = {
+  awbNumber: string;
+  shipmentId: string;
+  status: string;
+  lastActionDate: string;
+  location: string;
+  expectedDelivery: string;
+  codReleased: boolean;
+  codReleasedAt: string;
+  trackingSource: "api" | "public";
+  raw: unknown;
+};
+
+export type TfmCancelResult = {
+  cancelled: boolean;
+  status: string;
+  lastActionDate: string;
+  raw: unknown;
+};
+
+export type TfmLabelResult = {
+  bytes: Uint8Array;
+  contentType: string;
+  fileName: string;
+};
+
+type ParsedResponse = {
+  response: Response;
+  data: unknown;
+  rawText: string;
+  bytes: Uint8Array | null;
+};
+
+function isRecord(value: unknown): value is JsonRecord {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizedKey(value: string) {
+  return value.replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+function getPathValue(source: unknown, path: string): unknown {
+  const parts = path.split(".").filter(Boolean);
+  let current: unknown = source;
+
+  for (const part of parts) {
+    if (!isRecord(current)) return undefined;
+
+    const direct = current[part];
+    if (direct !== undefined) {
+      current = direct;
+      continue;
+    }
+
+    const matchingKey = Object.keys(current).find(
+      (key) => normalizedKey(key) === normalizedKey(part),
+    );
+
+    if (!matchingKey) return undefined;
+    current = current[matchingKey];
+  }
+
+  return current;
+}
+
+function renderStringTemplate(value: string, context: TemplateContext) {
+  const exact = value.match(/^\s*{{\s*([^{}]+?)\s*}}\s*$/);
+
+  if (exact) {
+    const replacement = getPathValue(context, exact[1]);
+    return replacement === undefined ? "" : replacement;
+  }
+
+  return value.replace(/{{\s*([^{}]+?)\s*}}/g, (_match, path) => {
+    const replacement = getPathValue(context, String(path));
+    return replacement === undefined || replacement === null
+      ? ""
+      : String(replacement);
+  });
+}
+
+function renderTemplate(value: unknown, context: TemplateContext): unknown {
+  if (typeof value === "string") {
+    return renderStringTemplate(value, context);
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => renderTemplate(item, context));
+  }
+
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nestedValue]) => [
+        key,
+        renderTemplate(nestedValue, context),
+      ]),
+    );
+  }
+
+  return value;
+}
+
+function renderPath(path: string, context: TemplateContext) {
+  return path
+    .replace(/{{\s*([^{}]+?)\s*}}/g, (_match, key) =>
+      encodeURIComponent(String(getPathValue(context, String(key)) ?? "")),
+    )
+    .replace(/{([^{}]+)}/g, (_match, key) =>
+      encodeURIComponent(String(getPathValue(context, String(key)) ?? "")),
+    );
+}
+
+function findValueByKeys(
+  value: unknown,
+  candidateKeys: string[],
+  depth = 0,
+): unknown {
+  if (depth > 10 || value === null || value === undefined) {
+    return undefined;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findValueByKeys(item, candidateKeys, depth + 1);
+      if (found !== undefined) return found;
+    }
+
+    return undefined;
+  }
+
+  if (!isRecord(value)) return undefined;
+
+  const normalizedCandidates = new Set(candidateKeys.map(normalizedKey));
+
+  for (const [key, nestedValue] of Object.entries(value)) {
+    if (normalizedCandidates.has(normalizedKey(key))) {
+      return nestedValue;
+    }
+  }
+
+  for (const nestedValue of Object.values(value)) {
+    const found = findValueByKeys(nestedValue, candidateKeys, depth + 1);
+    if (found !== undefined) return found;
+  }
+
+  return undefined;
+}
+
+function firstText(value: unknown): string {
+  if (Array.isArray(value)) return firstText(value[0]);
+
+  if (isRecord(value)) {
+    return firstText(
+      value.value ??
+        value.name ??
+        value.text ??
+        value.id ??
+        value.code ??
+        "",
+    );
+  }
+
+  return String(value ?? "").trim();
+}
+
+function dateText(value: unknown, fallback = "") {
+  const text = firstText(value);
+  if (!text) return fallback;
+
+  const parsed = new Date(text);
+  return Number.isNaN(parsed.getTime()) ? text : parsed.toISOString();
+}
+
+function redact(value: string) {
+  return String(value || "")
+    .replace(
+      /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g,
+      "[REDACTED_JWT]",
+    )
+    .replace(
+      /("(?:password|token|refreshToken|authorization)"\s*:\s*")[^"]*(")/gi,
+      "$1[REDACTED]$2",
+    )
+    .slice(0, 1800);
+}
+
+function responseMessage(data: unknown, rawText: string) {
+  const message = firstText(
+    findValueByKeys(data, [
+      "message",
+      "detail",
+      "title",
+      "errorMessage",
+      "description",
+      "errors",
+      "error",
+    ]),
+  );
+
+  return redact(message || rawText || "TFM request failed");
+}
+
+function normalizeUaeMobileForTfm(value: string) {
+  const digits = String(value || "").replace(/\D/g, "");
+
+  if (/^5\d{8}$/.test(digits)) return `971${digits}`;
+  if (/^05\d{8}$/.test(digits)) return `971${digits.slice(1)}`;
+  if (/^009715\d{8}$/.test(digits)) return digits.slice(2);
+  if (/^9715\d{8}$/.test(digits)) return digits;
+
+  return digits;
+}
+
+function requestContext(input: TfmShipmentInput, shipperId: string) {
+  const defaults = getTfmShipmentDefaults();
+  const mobileDigits = normalizeUaeMobileForTfm(input.phone);
+
+  if (!/^9715\d{8}$/.test(mobileDigits)) {
+    throw new Error(
+      `Invalid UAE mobile number for ${input.orderNo}. Use 551280604, 0551280604 or 971551280604.`,
+    );
+  }
+  const deliveryServiceCode =
+    input.deliveryServiceCode ||
+    (input.codAmount > 0
+      ? defaults.codServiceCode
+      : defaults.prepaidServiceCode);
+
+  if (!deliveryServiceCode) {
+    throw new Error(
+      "TFM delivery service code is missing. Configure TFM_PREPAID_SERVICE_CODE before booking prepaid orders.",
+    );
+  }
+
+  return {
+    ...input,
+    shipperId,
+    subAccountId: defaults.subAccountId,
+    consigneeCountry: input.country || defaults.defaultCountry,
+    deliveryServiceCode,
+    totalWeight:
+      input.totalWeight > 0
+        ? input.totalWeight
+        : defaults.defaultWeight,
+    totalVolumeWeight:
+      input.totalVolumeWeight > 0
+        ? input.totalVolumeWeight
+        : defaults.defaultVolumeWeight,
+    content: input.content || defaults.defaultContent,
+    mobileDigits,
+    telephoneDigits: mobileDigits,
+    handlingPack: defaults.handlingPack,
+    handlingCold: defaults.handlingCold,
+    handlingFragile: defaults.handlingFragile,
+    printMode: defaults.printMode,
+    cod: input.codAmount,
+    amount: input.codAmount,
+    value: input.total,
+    currency: "AED",
+    currentDate: new Date().toISOString(),
+    fullAddress: [
+      input.address,
+      input.building,
+      input.street,
+      input.area,
+    ]
+      .filter(Boolean)
+      .join(", "),
+  } satisfies TemplateContext;
+}
+
+function assertOperationReady(
+  operation: TfmOperation,
+  configuration: TfmEndpointConfiguration,
+) {
+  if (!getTfmAllowLiveRequests()) {
+    throw new Error(
+      "Live TFM requests are disabled. Set TFM_ALLOW_LIVE_REQUESTS=true after sandbox verification.",
+    );
+  }
+
+  if (!configuration.path) {
+    throw new Error(
+      `TFM ${operation} endpoint path is missing from .env.local`,
+    );
+  }
+
+  if (
+    configuration.method !== "GET" &&
+    configuration.method !== "DELETE" &&
+    !configuration.bodyTemplateConfigured
+  ) {
+    throw new Error(
+      `TFM ${operation} body template is missing from .env.local`,
+    );
+  }
+}
+
+async function parseResponse(response: Response): Promise<ParsedResponse> {
+  const contentType = response.headers.get("content-type") || "";
+
+  if (
+    contentType.includes("application/pdf") ||
+    contentType.includes("application/octet-stream") ||
+    contentType.startsWith("image/")
+  ) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return { response, data: null, rawText: "", bytes };
+  }
+
+  const rawText = await response.text();
+  let data: unknown = rawText;
+
+  if (rawText.trim()) {
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      data = rawText;
+    }
+  }
+
+  return { response, data, rawText, bytes: null };
+}
+
+async function performRequest({
+  operation,
+  input,
+  forceFreshAuthentication = false,
+  bodyOverride,
+}: {
+  operation: TfmOperation;
+  input: TfmShipmentInput;
+  forceFreshAuthentication?: boolean;
+  bodyOverride?: unknown;
+}): Promise<ParsedResponse> {
+  const configuration = getTfmEndpointConfiguration(operation);
+  assertOperationReady(operation, configuration);
+
+  if (forceFreshAuthentication) clearTfmAuthCache();
+
+  const authorization = await getTfmAuthorizationContext();
+  const context = requestContext(input, authorization.shipperId);
+  const path = renderPath(configuration.path, context);
+  const method = configuration.method;
+  const body =
+    bodyOverride !== undefined
+      ? bodyOverride
+      : configuration.bodyTemplateConfigured
+        ? renderTemplate(configuration.bodyTemplate, context)
+        : null;
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    getTfmRequestTimeoutMs(),
+  );
+
+  try {
+    const hasBody =
+      method !== "GET" && method !== "DELETE" && body !== null;
+    const headers: Record<string, string> = {
+      Accept:
+        operation === "create"
+          ? "text/plain"
+          : "application/json, text/plain, application/pdf, */*",
+      ...getTfmExtraHeaders(),
+      Authorization: authorization.authorizationHeader,
+    };
+
+    if (hasBody) headers["Content-Type"] = "application/json";
+
+    const response = await globalThis.fetch(joinTfmUrl(path), {
+      method,
+      headers,
+      body: hasBody ? JSON.stringify(body) : undefined,
+      cache: "no-store",
+      signal: controller.signal,
+    });
+
+    const parsed = await parseResponse(response);
+
+    if (response.status === 401 && !forceFreshAuthentication) {
+      return performRequest({
+        operation,
+        input,
+        forceFreshAuthentication: true,
+        bodyOverride,
+      });
+    }
+
+    if (!response.ok) {
+      throw new Error(
+        `TFM ${operation} failed (HTTP ${response.status}). ${responseMessage(
+          parsed.data,
+          parsed.rawText,
+        )}`,
+      );
+    }
+
+    const explicitError = firstText(
+      findValueByKeys(parsed.data, ["isError", "hasError"]),
+    ).toLowerCase();
+    const explicitSuccess = firstText(
+      findValueByKeys(parsed.data, ["success", "succeeded"]),
+    ).toLowerCase();
+    const responseStatusCode = Number(
+      firstText(findValueByKeys(parsed.data, ["statusCode"])),
+    );
+
+    if (
+      ["true", "1", "yes"].includes(explicitError) ||
+      ["false", "0", "no"].includes(explicitSuccess) ||
+      (Number.isFinite(responseStatusCode) && responseStatusCode >= 400)
+    ) {
+      throw new Error(
+        `TFM ${operation} failed. ${responseMessage(
+          parsed.data,
+          parsed.rawText,
+        )}`,
+      );
+    }
+
+    return parsed;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(
+        `TFM ${operation} timed out after ${getTfmRequestTimeoutMs()} ms`,
+      );
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function plainTextAwb(value: unknown) {
+  if (typeof value !== "string" && typeof value !== "number") return "";
+
+  const text = String(value).trim().replace(/^"|"$/g, "");
+  if (/^[A-Za-z0-9-]{6,40}$/.test(text)) return text;
+
+  const labelled = text.match(
+    /(?:awb|sky\s*bill|skybill|waybill|tracking)[^A-Za-z0-9-]*([A-Za-z0-9-]{6,40})/i,
+  );
+
+  return labelled?.[1] || "";
+}
+
+export async function createTfmShipment(
+  input: TfmShipmentInput,
+): Promise<TfmCreateResult> {
+  const parsed = await performRequest({ operation: "create", input });
+  const data = parsed.data;
+  const awbNumber =
+    firstText(
+      findValueByKeys(data, [
+        "awb",
+        "awbNo",
+        "awbNumber",
+        "skyBill",
+        "skyBillId",
+        "skyBillNo",
+        "skybillNo",
+        "skyBillNumber",
+        "skyBillCode",
+        "waybill",
+        "waybillNo",
+        "waybillNumber",
+        "trackingNumber",
+        "trackingCode",
+        "shipmentNumber",
+        "consignmentNumber",
+      ]),
+    ) ||
+    plainTextAwb(firstText(findValueByKeys(data, ["result"]))) ||
+    plainTextAwb(data) ||
+    plainTextAwb(parsed.rawText);
+
+  if (!awbNumber) {
+    throw new Error(
+      "TFM accepted the shipment request but no AWB/tracking number was found in the response. Configure the official response mapping before production use.",
+    );
+  }
+
+  const now = new Date().toISOString();
+
+  return {
+    awbNumber,
+    shipmentId: firstText(
+      findValueByKeys(data, [
+        "shipmentId",
+        "shipmentID",
+        "shipmentReference",
+        "id",
+      ]),
+    ),
+    status:
+      firstText(
+        findValueByKeys(data, [
+          "status",
+          "shipmentStatus",
+          "currentStatus",
+          "statusDescription",
+        ]),
+      ) || "Created",
+    bookingDate: dateText(
+      findValueByKeys(data, [
+        "bookingDate",
+        "created",
+        "createdAt",
+        "shipmentDate",
+        "date",
+      ]),
+      now,
+    ),
+    lastActionDate: dateText(
+      findValueByKeys(data, [
+        "lastActionDate",
+        "lastUpdated",
+        "updatedAt",
+        "statusDate",
+      ]),
+      now,
+    ),
+    raw: data,
+  };
+}
+
+type TrackingSnapshot = {
+  status: string;
+  lastActionDate: string;
+  timestampMs: number;
+  location: string;
+};
+
+const TRACKING_STATUS_KEYS = [
+  "currentStatus",
+  "shipmentStatus",
+  "statusDescription",
+  "statusName",
+  "subStatus",
+  "sub_status",
+  "trackingStatus",
+  "tracking_status",
+  "eventDescription",
+  "activity",
+  "action",
+  "description",
+  "status",
+];
+
+const TRACKING_DATE_KEYS = [
+  "lastActionDate",
+  "lastUpdated",
+  "updatedAt",
+  "statusDate",
+  "eventDate",
+  "activityDate",
+  "eventDateTime",
+  "dateTime",
+  "scanDate",
+  "createdAt",
+  "created",
+  "date",
+];
+
+const TRACKING_LOCATION_KEYS = [
+  "currentLocation",
+  "trackingLocation",
+  "location",
+  "city",
+  "lastLocation",
+  "lastKnownLocation",
+  "eventLocation",
+  "scanLocation",
+  "locationName",
+  "hubName",
+  "facilityName",
+  "branchName",
+];
+
+const TRACKING_EXPECTED_DELIVERY_KEYS = [
+  "expectedDelivery",
+  "expectedDeliveryDate",
+  "estimatedDelivery",
+  "estimatedDeliveryDate",
+  "expectedDate",
+  "futureDelivery",
+  "futureDeliveryDate",
+  "estimatedDate",
+  "eta",
+];
+
+function directValueByKeys(
+  value: unknown,
+  candidateKeys: string[],
+): unknown {
+  if (!isRecord(value)) return undefined;
+  const candidates = new Set(candidateKeys.map(normalizedKey));
+
+  for (const [key, nestedValue] of Object.entries(value)) {
+    if (candidates.has(normalizedKey(key))) return nestedValue;
+  }
+
+  return undefined;
+}
+
+function readableTrackingStatus(value: unknown): string {
+  const text = firstText(value).replace(/\s+/g, " ").trim();
+  const normalized = text.toLowerCase();
+
+  if (!text || text.length > 240) return "";
+  if (/^\d{1,3}$/.test(text)) return "";
+  if (
+    [
+      "true",
+      "false",
+      "null",
+      "undefined",
+      "success",
+      "successful",
+      "ok",
+      "request successful",
+      "request completed",
+      "done",
+    ].includes(normalized)
+  ) {
+    return "";
+  }
+
+  return text;
+}
+
+function readableTrackingLocation(value: unknown): string {
+  const text = firstText(value).replace(/\s+/g, " ").trim();
+
+  if (!text || text.length > 240) return "";
+  if (["true", "false", "null", "undefined"].includes(text.toLowerCase())) {
+    return "";
+  }
+
+  return text;
+}
+
+function timestampValue(value: unknown): number {
+  const text = firstText(value);
+  if (!text) return Number.NaN;
+  const parsed = new Date(text).getTime();
+  return Number.isNaN(parsed) ? Number.NaN : parsed;
+}
+
+function collectTrackingSnapshots(
+  value: unknown,
+  output: TrackingSnapshot[],
+  depth = 0,
+) {
+  if (depth > 12 || value === null || value === undefined) return;
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectTrackingSnapshots(item, output, depth + 1);
+    }
+    return;
+  }
+
+  if (!isRecord(value)) return;
+
+  const status = readableTrackingStatus(
+    directValueByKeys(value, TRACKING_STATUS_KEYS),
+  );
+
+  if (status) {
+    const dateSource = directValueByKeys(value, TRACKING_DATE_KEYS);
+    const timestampMs = timestampValue(dateSource);
+
+    output.push({
+      status,
+      lastActionDate: dateText(dateSource),
+      timestampMs,
+      location: readableTrackingLocation(
+        directValueByKeys(value, TRACKING_LOCATION_KEYS),
+      ),
+    });
+  }
+
+  for (const nestedValue of Object.values(value)) {
+    collectTrackingSnapshots(nestedValue, output, depth + 1);
+  }
+}
+
+function selectTrackingSnapshot(data: unknown): TrackingSnapshot | null {
+  const snapshots: TrackingSnapshot[] = [];
+  collectTrackingSnapshots(data, snapshots);
+
+  if (!snapshots.length) return null;
+
+  const dated = snapshots.filter((item) =>
+    Number.isFinite(item.timestampMs),
+  );
+
+  if (dated.length) {
+    return dated.reduce((latest, item) =>
+      item.timestampMs > latest.timestampMs ? item : latest,
+    );
+  }
+
+  return snapshots[0];
+}
+
+const COD_RELEASE_STATUS_WORDS = [
+  "cod released",
+  "cod release",
+  "cod remitted",
+  "cod remittance",
+  "cod settled",
+  "cod settlement",
+  "cash released",
+  "cash release",
+  "payment released",
+  "payment release",
+  "remittance released",
+  "remittance release",
+  "amount released",
+  "paid to shipper",
+];
+
+function normalizeTrackingPhrase(value: unknown) {
+  return firstText(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+}
+
+function isCodReleaseStatus(value: unknown) {
+  const text = normalizeTrackingPhrase(value);
+  return Boolean(
+    text &&
+      COD_RELEASE_STATUS_WORDS.some((word) => text.includes(word)),
+  );
+}
+
+function latestCodReleaseSnapshot(data: unknown): TrackingSnapshot | null {
+  const snapshots: TrackingSnapshot[] = [];
+  collectTrackingSnapshots(data, snapshots);
+  const matching = snapshots.filter((item) => isCodReleaseStatus(item.status));
+
+  if (!matching.length) return null;
+
+  const dated = matching.filter((item) => Number.isFinite(item.timestampMs));
+  if (dated.length) {
+    return dated.reduce((latest, item) =>
+      item.timestampMs > latest.timestampMs ? item : latest,
+    );
+  }
+
+  return matching[matching.length - 1];
+}
+
+function structuredCodReleased(data: unknown) {
+  const explicit = findValueByKeys(data, [
+    "codReleased",
+    "isCodReleased",
+    "codIsReleased",
+    "cashReleased",
+    "isCashReleased",
+  ]);
+
+  if (explicit === true || explicit === 1) return true;
+  if (typeof explicit === "string") {
+    const value = explicit.trim().toLowerCase();
+    if (["1", "true", "yes", "released", "paid", "settled", "remitted"].includes(value)) {
+      return true;
+    }
+  }
+
+  const status = findValueByKeys(data, [
+    "codStatus",
+    "codPaymentStatus",
+    "paymentStatus",
+    "remittanceStatus",
+    "settlementStatus",
+  ]);
+
+  const statusText = normalizeTrackingPhrase(status);
+  return Boolean(
+    statusText &&
+      ["released", "paid", "settled", "remitted", "received"].some((word) =>
+        statusText.includes(word),
+      ),
+  );
+}
+
+export async function trackTfmShipment(
+  input: TfmShipmentInput,
+): Promise<TfmTrackResult> {
+  let apiError: unknown = null;
+
+  try {
+    const parsed = await performRequest({ operation: "track", input });
+    const data = parsed.data;
+    const snapshot = selectTrackingSnapshot(data);
+    const codReleaseSnapshot = latestCodReleaseSnapshot(data);
+    const hasStructuredCodRelease = structuredCodReleased(data);
+
+    if (!snapshot?.status) {
+      const debugRaw = JSON.stringify(data, null, 2).slice(0, 4000);
+      throw new Error(
+        "TFM tracking response did not contain a readable shipment status. Raw response: " +
+          debugRaw,
+      );
+    }
+
+    return {
+      awbNumber:
+        firstText(
+          findValueByKeys(data, [
+            "awb",
+            "awbNo",
+            "awbNumber",
+            "skyBill",
+            "skyBillNo",
+            "skybillNo",
+            "waybill",
+            "waybillNo",
+            "trackingNumber",
+            "trackingCode",
+          ]),
+        ) || input.awbNumber,
+      shipmentId:
+        firstText(
+          findValueByKeys(data, [
+            "shipmentId",
+            "shipmentID",
+            "shipmentReference",
+            "id",
+          ]),
+        ) || input.shipmentId,
+      status: snapshot.status,
+      lastActionDate: snapshot.lastActionDate,
+      location:
+        snapshot.location ||
+        readableTrackingLocation(
+          findValueByKeys(data, [
+            "currentLocation",
+            "trackingLocation",
+            "lastLocation",
+            "lastKnownLocation",
+          ]),
+        ),
+      expectedDelivery: dateText(
+        findValueByKeys(data, TRACKING_EXPECTED_DELIVERY_KEYS),
+      ),
+      codReleased: Boolean(codReleaseSnapshot || hasStructuredCodRelease),
+      codReleasedAt:
+        codReleaseSnapshot?.lastActionDate ||
+        dateText(
+          findValueByKeys(data, [
+            "codReleasedAt",
+            "codReleaseDate",
+            "codReleaseDateTime",
+            "cashReleasedAt",
+            "paymentReleasedAt",
+            "remittanceDate",
+            "settlementDate",
+          ]),
+        ) ||
+        (hasStructuredCodRelease ? new Date().toISOString() : ""),
+      trackingSource: "api",
+      raw: data,
+    };
+  } catch (error) {
+    apiError = error;
+  }
+
+  if (!input.awbNumber) {
+    throw apiError instanceof Error
+      ? apiError
+      : new Error("TFM tracking API failed and public fallback has no AWB number");
+  }
+
+  try {
+    const publicTracked = await trackTfmShipmentPublic(input.awbNumber);
+    return {
+      awbNumber: publicTracked.awbNumber || input.awbNumber,
+      shipmentId: input.shipmentId,
+      status: publicTracked.status,
+      lastActionDate: publicTracked.lastActionDate,
+      location: publicTracked.location,
+      expectedDelivery: publicTracked.expectedDelivery,
+      codReleased: publicTracked.codReleased,
+      codReleasedAt: publicTracked.codReleasedAt,
+      trackingSource: "public",
+      raw: {
+        source: "TFM public tracker fallback",
+        apiError:
+          apiError instanceof Error
+            ? apiError.message.slice(0, 1500)
+            : String(apiError || "TFM API failed").slice(0, 1500),
+        public: publicTracked.raw,
+      },
+    };
+  } catch (publicError) {
+    const apiMessage =
+      apiError instanceof Error ? apiError.message : String(apiError || "TFM API failed");
+    const publicMessage =
+      publicError instanceof Error
+        ? publicError.message
+        : String(publicError || "TFM public tracker failed");
+
+    throw new Error(
+      `TFM tracking API failed: ${apiMessage.slice(0, 1200)} | Public tracker fallback failed: ${publicMessage.slice(0, 1200)}. No Airtable tracking fields were changed.`,
+    );
+  }
+}
+
+export async function cancelTfmShipment(
+  input: TfmShipmentInput,
+): Promise<TfmCancelResult> {
+  const parsed = await performRequest({ operation: "cancel", input });
+  const data = parsed.data;
+  const status =
+    firstText(
+      findValueByKeys(data, [
+        "status",
+        "shipmentStatus",
+        "currentStatus",
+        "message",
+      ]),
+    ) || "Cancelled";
+  const explicitSuccess = findValueByKeys(data, [
+    "success",
+    "cancelled",
+    "isCancelled",
+  ]);
+
+  return {
+    cancelled:
+      explicitSuccess === undefined
+        ? true
+        : ["true", "1", "yes", "cancelled", "canceled"].includes(
+            firstText(explicitSuccess).toLowerCase(),
+          ),
+    status,
+    lastActionDate: dateText(
+      findValueByKeys(data, [
+        "lastActionDate",
+        "updatedAt",
+        "statusDate",
+        "date",
+      ]),
+      new Date().toISOString(),
+    ),
+    raw: data,
+  };
+}
+
+function decodeBase64(value: string) {
+  const clean = value
+    .replace(/^data:[^;]+;base64,/i, "")
+    .replace(/\s+/g, "");
+  return new Uint8Array(Buffer.from(clean, "base64"));
+}
+
+function pdfBytesFromBase64(value: string): Uint8Array | null {
+  const clean = String(value || "")
+    .trim()
+    .replace(/^data:application\/pdf;base64,/i, "")
+    .replace(/\s+/g, "");
+
+  if (!clean || clean.length < 20) return null;
+
+  try {
+    const bytes = decodeBase64(clean);
+    if (bytes.length < 5) return null;
+
+    const header = Buffer.from(bytes.subarray(0, 5)).toString("ascii");
+    return header === "%PDF-" ? bytes : null;
+  } catch {
+    return null;
+  }
+}
+
+function collectLabelTextCandidates(
+  value: unknown,
+  output: string[] = [],
+  depth = 0,
+): string[] {
+  if (depth > 8 || value === null || value === undefined) return output;
+
+  if (typeof value === "string" || typeof value === "number") {
+    const text = String(value).trim();
+    if (text) output.push(text);
+    return output;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectLabelTextCandidates(item, output, depth + 1);
+    }
+    return output;
+  }
+
+  if (isRecord(value)) {
+    for (const nested of Object.values(value)) {
+      collectLabelTextCandidates(nested, output, depth + 1);
+    }
+  }
+
+  return output;
+}
+
+function labelResponseDescription(data: unknown, rawText: string) {
+  const content = String(rawText || "").trim();
+
+  if (isRecord(data)) {
+    const keys = Object.keys(data).slice(0, 12);
+    return `JSON object keys: ${keys.join(", ") || "none"}`;
+  }
+
+  if (Array.isArray(data)) {
+    return `JSON array length: ${data.length}`;
+  }
+
+  if (content) {
+    return `plain-text response length: ${content.length}`;
+  }
+
+  return `response type: ${typeof data}`;
+}
+
+function fileNameFromDisposition(value: string | null) {
+  if (!value) return "";
+
+  const utf8 = value.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8) return decodeURIComponent(utf8[1].replace(/["']/g, ""));
+
+  const simple = value.match(/filename="?([^";]+)"?/i);
+  return simple ? simple[1].trim() : "";
+}
+
+async function downloadLabelUrl(
+  url: string,
+  input: TfmShipmentInput,
+): Promise<TfmLabelResult> {
+  const apiOrigin = new URL(getTfmApiBaseUrl());
+  const resolved = new URL(url, apiOrigin);
+  const allowedHosts = new Set([
+    apiOrigin.host.toLowerCase(),
+    ...getTfmLabelAllowedHosts(),
+  ]);
+
+  if (!["http:", "https:"].includes(resolved.protocol)) {
+    throw new Error("TFM label URL uses an unsupported protocol");
+  }
+
+  if (!allowedHosts.has(resolved.host.toLowerCase())) {
+    throw new Error(
+      `TFM label URL host is not allowed: ${resolved.host}. Add it to TFM_LABEL_ALLOWED_HOSTS only after verification.`,
+    );
+  }
+
+  const sameOrigin = resolved.origin === apiOrigin.origin;
+  const headers: Record<string, string> = {};
+
+  if (sameOrigin) {
+    const authorization = await getTfmAuthorizationContext();
+    Object.assign(headers, getTfmExtraHeaders(), {
+      Authorization: authorization.authorizationHeader,
+      "X-Shipper-Id": authorization.shipperId,
+    });
+  }
+
+  const response = await globalThis.fetch(resolved, {
+    headers,
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(`TFM label download failed (HTTP ${response.status})`);
+  }
+
+  return {
+    bytes: new Uint8Array(await response.arrayBuffer()),
+    contentType: response.headers.get("content-type") || "application/pdf",
+    fileName:
+      fileNameFromDisposition(response.headers.get("content-disposition")) ||
+      `TFM-${input.awbNumber || input.orderNo}.pdf`,
+  };
+}
+
+async function labelResultFromParsedResponse(
+  parsed: ParsedResponse,
+  input: TfmShipmentInput,
+  preferredFileName = "",
+): Promise<TfmLabelResult> {
+  const contentType =
+    parsed.response.headers.get("content-type") || "application/pdf";
+  const fileName =
+    preferredFileName ||
+    fileNameFromDisposition(
+      parsed.response.headers.get("content-disposition"),
+    ) ||
+    `TFM-${input.awbNumber || input.orderNo}.pdf`;
+
+  if (parsed.bytes?.length) {
+    return { bytes: parsed.bytes, contentType, fileName };
+  }
+
+  const labelUrl = firstText(
+    findValueByKeys(parsed.data, [
+      "labelUrl",
+      "downloadUrl",
+      "fileUrl",
+      "pdfUrl",
+      "url",
+    ]),
+  );
+
+  if (labelUrl) {
+    const downloaded = await downloadLabelUrl(labelUrl, input);
+    return preferredFileName
+      ? { ...downloaded, fileName: preferredFileName }
+      : downloaded;
+  }
+
+  const base64 = firstText(
+    findValueByKeys(parsed.data, [
+      "labelBase64",
+      "pdfBase64",
+      "fileContent",
+      "documentContent",
+      "content",
+      "label",
+      "pdf",
+    ]),
+  );
+
+  const knownPdfBytes = pdfBytesFromBase64(base64);
+  if (knownPdfBytes) {
+    return {
+      bytes: knownPdfBytes,
+      contentType: "application/pdf",
+      fileName,
+    };
+  }
+
+  const textCandidates = Array.from(
+    new Set([
+      ...collectLabelTextCandidates(parsed.data),
+      String(parsed.rawText || "").trim(),
+    ].filter(Boolean)),
+  );
+
+  for (const candidate of textCandidates) {
+    if (/^(?:https?:\/\/|\/)/i.test(candidate)) {
+      const downloaded = await downloadLabelUrl(candidate, input);
+      return preferredFileName
+        ? { ...downloaded, fileName: preferredFileName }
+        : downloaded;
+    }
+  }
+
+  for (const candidate of textCandidates) {
+    const bytes = pdfBytesFromBase64(candidate);
+    if (bytes) {
+      return { bytes, contentType: "application/pdf", fileName };
+    }
+  }
+
+  throw new Error(
+    `TFM label response was received but its document format is unsupported (${labelResponseDescription(
+      parsed.data,
+      parsed.rawText,
+    )}). Expected PDF bytes, a download URL, or Base64 PDF.`,
+  );
+}
+
+export async function getTfmShipmentLabel(
+  input: TfmShipmentInput,
+): Promise<TfmLabelResult> {
+  const parsed = await performRequest({ operation: "label", input });
+  return labelResultFromParsedResponse(parsed, input);
+}
+
+export async function getTfmBulkShipmentLabel(
+  inputs: TfmShipmentInput[],
+): Promise<TfmLabelResult> {
+  const validInputs = inputs.filter((item) => String(item.awbNumber || "").trim());
+  const awbs = Array.from(
+    new Set(validInputs.map((item) => String(item.awbNumber).trim()).filter(Boolean)),
+  );
+
+  if (!validInputs.length || !awbs.length) {
+    throw new Error("TFM bulk print requires at least one AWB number");
+  }
+
+  // The official Print by AWB contract accepts an AWB array. Sending the
+  // whole selection in one request avoids repeated/duplicated PDFs produced
+  // by client-side one-AWB-at-a-time merging.
+  const parsed = await performRequest({
+    operation: "label",
+    input: validInputs[0],
+    bodyOverride: {
+      awb: awbs,
+      printmode: 2,
+    },
+  });
+
+  return labelResultFromParsedResponse(
+    parsed,
+    validInputs[0],
+    `TFM-Bulk-Labels-${awbs.length}.pdf`,
+  );
+}

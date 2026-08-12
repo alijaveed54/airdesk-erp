@@ -41,6 +41,102 @@ function getDefaultSupplierFromSku(sku: string) {
   return match?.[0]?.toUpperCase() || "";
 }
 
+async function readApiResponse(response: Response, fallbackMessage: string) {
+  const contentType = response.headers.get("content-type") || "";
+  const responseText = await response.text();
+
+  if (contentType.includes("application/json")) {
+    try {
+      return JSON.parse(responseText);
+    } catch {
+      throw new Error(
+        `${fallbackMessage} (invalid JSON response, HTTP ${response.status})`,
+      );
+    }
+  }
+
+  const cleanText = responseText
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  throw new Error(
+    cleanText
+      ? `${fallbackMessage} (HTTP ${response.status}): ${cleanText.slice(0, 220)}`
+      : `${fallbackMessage} (HTTP ${response.status})`,
+  );
+}
+
+async function convertProductImageToWebp(
+  file: File,
+  sku: string,
+  price: number,
+) {
+  const imageUrl = URL.createObjectURL(file);
+
+  try {
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const element = new Image();
+
+      element.onload = () => resolve(element);
+      element.onerror = () =>
+        reject(new Error("Unable to read selected image"));
+      element.src = imageUrl;
+    });
+
+    const maxDimension = 1600;
+    const scale = Math.min(
+      1,
+      maxDimension / image.naturalWidth,
+      maxDimension / image.naturalHeight,
+    );
+
+    const width = Math.max(1, Math.round(image.naturalWidth * scale));
+    const height = Math.max(1, Math.round(image.naturalHeight * scale));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+
+    const context = canvas.getContext("2d");
+
+    if (!context) {
+      throw new Error("Image conversion is not supported in this browser");
+    }
+
+    context.drawImage(image, 0, 0, width, height);
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (result) => {
+          if (result) {
+            resolve(result);
+          } else {
+            reject(new Error("WebP conversion failed"));
+          }
+        },
+        "image/webp",
+        0.75,
+      );
+    });
+
+    const safeSku = sku
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9_-]+/g, "-");
+    const safePrice = Number.isFinite(price) && price > 0 ? price : 0;
+
+    return new File([blob], `${safeSku} - AED ${safePrice} (01).webp`, {
+      type: "image/webp",
+      lastModified: Date.now(),
+    });
+  } finally {
+    URL.revokeObjectURL(imageUrl);
+  }
+}
+
 function mapProduct(record: AirtableRecord): Product {
   const fields = record.fields;
   const sku = fields.SKU || "-";
@@ -52,9 +148,7 @@ function mapProduct(record: AirtableRecord): Product {
     price: getFirst(fields.Price || fields.CP || fields["Sale Price"]) || "-",
     stock: fields["Balance Stock"] ?? fields.Stock ?? fields.stock ?? "-",
     purchaseSupplier:
-      fields.Supplier ||
-      fields["Supplier"] ||
-      getDefaultSupplierFromSku(sku),
+      fields.Supplier || fields["Supplier"] || getDefaultSupplierFromSku(sku),
     supplierSku: fields["ALV Supplier Code"] || "",
   };
 }
@@ -101,7 +195,32 @@ export default function ProductSearch({
   const [savingProduct, setSavingProduct] = useState(false);
   const [productSaveError, setProductSaveError] = useState("");
   const [productSaveSuccess, setProductSaveSuccess] = useState("");
-  
+
+  useEffect(() => {
+    function handlePaste(event: ClipboardEvent) {
+      const items = event.clipboardData?.items;
+
+      if (!items) return;
+
+      for (const item of items) {
+        if (item.type.startsWith("image/")) {
+          const file = item.getAsFile();
+
+          if (file) {
+            setProductImage(file);
+            setProductImagePreview(URL.createObjectURL(file));
+            break;
+          }
+        }
+      }
+    }
+
+    window.addEventListener("paste", handlePaste);
+
+    return () => {
+      window.removeEventListener("paste", handlePaste);
+    };
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -144,27 +263,27 @@ export default function ProductSearch({
 
       try {
         const res = await fetch(
-          `/api/products?search=${encodeURIComponent(value)}&pageSize=10`
+          `/api/products?search=${encodeURIComponent(value)}&pageSize=10`,
         );
         const data = await res.json();
 
         if (res.ok && data.success) {
-    const records = (data.records || [])
-      .map(mapProduct)
-      .filter((product: Product) => {
-        if (!enableStockValidation) return true;
-        return Number(product.stock) > 0;
-      });
+          const records = (data.records || [])
+            .map(mapProduct)
+            .filter((product: Product) => {
+              if (!enableStockValidation) return true;
+              return Number(product.stock) > 0;
+            });
 
-    setResults(records);
-    setSearched(true);
+          setResults(records);
+          setSearched(true);
 
-    setShowAddProduct(records.length === 0);
-} else {
-    setResults([]);
-    setSearched(true);
-    setShowAddProduct(true);
-}
+          setShowAddProduct(records.length === 0);
+        } else {
+          setResults([]);
+          setSearched(true);
+          setShowAddProduct(true);
+        }
       } finally {
         setLoading(false);
       }
@@ -203,87 +322,102 @@ export default function ProductSearch({
     setQuery(product.sku);
     setResults([]);
   }
-async function saveNewProduct() {
-  setProductSaveError("");
-  setProductSaveSuccess("");
+  async function saveNewProduct() {
+    setProductSaveError("");
+    setProductSaveSuccess("");
 
-  if (!newProductSku.trim()) {
-    setProductSaveError("SKU is required");
-    return;
-  }
-
-  setSavingProduct(true);
-
-  try {
-    let imageUrl = "";
-
-if (productImage) {
-  setUploadingImage(true);
-
-  const formData = new FormData();
-  formData.append("file", productImage);
-
-  const uploadRes = await fetch("/api/upload/image", {
-    method: "POST",
-    body: formData,
-  });
-
-  const uploadData = await uploadRes.json();
-
-  if (!uploadRes.ok || !uploadData.success) {
-    throw new Error(uploadData.message || "Image upload failed");
-  }
-
-  imageUrl = uploadData.url;
-
-  setUploadingImage(false);
-}
-    const res = await fetch("/api/products/create", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-  sku: newProductSku.trim(),
-  supplierSku: newSupplierSku.trim(),
-  cp: Number(newProductCp) || 0,
-  price: Number(newProductPrice) || Number(newProductCp) || 0,
-  imageUrl,
-}),
-    });
-
-    const data = await res.json();
-
-    if (!res.ok || !data.success) {
-      throw new Error(data.message || "Product save failed");
+    if (!newProductSku.trim()) {
+      setProductSaveError("SKU is required");
+      return;
     }
 
-    const createdProduct = mapProduct(data.record);
+    setSavingProduct(true);
 
-setSelectedProduct(createdProduct);
-setQuery(createdProduct.sku);
-setResults([]);
-setSearched(false);
-setShowAddProduct(false);
+    try {
+      let imageUrl = "";
+      let r2Key = "";
 
-setShowAddProductModal(false);
-setProductSaveSuccess("");
-setProductSaveError("");
+      if (productImage) {
+        setUploadingImage(true);
 
-setNewProductSku("");
-setNewSupplierSku("");
-setNewProductCp("");
-setNewProductPrice("");
-setProductImage(null);
-setProductImagePreview("");
-  } catch (error) {
-    setProductSaveError(
-      error instanceof Error ? error.message : "Product save failed"
-    );
-  } finally {
-    setSavingProduct(false);
+        try {
+          const convertedImage = await convertProductImageToWebp(
+            productImage,
+            newProductSku,
+            Number(newProductPrice) || Number(newProductCp) || 0,
+          );
+
+          const formData = new FormData();
+          formData.append("file", convertedImage);
+
+          const uploadRes = await fetch("/api/r2/upload", {
+            method: "POST",
+            body: formData,
+          });
+
+          const uploadData = await readApiResponse(
+            uploadRes,
+            "Image upload failed",
+          );
+
+          if (!uploadRes.ok || !uploadData.success) {
+            throw new Error(uploadData.message || "Image upload failed");
+          }
+
+          imageUrl = uploadData.url;
+          r2Key = uploadData.key || "";
+        } finally {
+          setUploadingImage(false);
+        }
+      }
+      const res = await fetch("/api/products/create", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          sku: newProductSku.trim(),
+          supplierSku: newSupplierSku.trim(),
+          supplier: newProductSupplier.trim(),
+          cp: Number(newProductCp) || 0,
+          price: Number(newProductPrice) || Number(newProductCp) || 0,
+          imageUrl,
+          r2Key,
+        }),
+      });
+
+      const data = await readApiResponse(res, "Product save failed");
+
+      if (!res.ok || !data.success) {
+        throw new Error(data.message || "Product save failed");
+      }
+
+      const createdProduct = mapProduct(data.record);
+
+      setSelectedProduct(createdProduct);
+      setQuery(createdProduct.sku);
+      setResults([]);
+      setSearched(false);
+      setShowAddProduct(false);
+
+      setShowAddProductModal(false);
+      setProductSaveSuccess("");
+      setProductSaveError("");
+
+      setNewProductSku("");
+      setNewSupplierSku("");
+      setNewProductCp("");
+      setNewProductPrice("");
+      setProductImage(null);
+      setProductImagePreview("");
+    } catch (error) {
+      setProductSaveError(
+        error instanceof Error ? error.message : "Product save failed",
+      );
+    } finally {
+      setSavingProduct(false);
+    }
   }
-}
   function addProduct() {
     if (!selectedProduct) return;
 
@@ -301,8 +435,8 @@ setProductImagePreview("");
       if (newOrderTotalQty > availableStock) {
         alert(
           `Available stock is ${availableStock} pc(s). ` +
-          `${alreadyAddedQty} pc(s) already added in this order. ` +
-          `You can add only ${remainingStock} more pc(s).`
+            `${alreadyAddedQty} pc(s) already added in this order. ` +
+            `You can add only ${remainingStock} more pc(s).`,
         );
 
         if (remainingStock > 0) {
@@ -320,8 +454,11 @@ setProductImagePreview("");
       supplierSku: selectedProduct.supplierSku || "",
       image: selectedProduct.image,
       purchaseSupplier:
-        selectedProduct.purchaseSupplier || getDefaultSupplierFromSku(selectedProduct.sku),
-      price: isI5qDqBase ? Number(singlePrice) || 0 : Number(selectedProduct.price) || 0,
+        selectedProduct.purchaseSupplier ||
+        getDefaultSupplierFromSku(selectedProduct.sku),
+      price: isI5qDqBase
+        ? Number(singlePrice) || 0
+        : Number(selectedProduct.price) || 0,
       qty: Number(quantity) || 1,
       stock: selectedProduct.stock,
       warehouse: isI5qDqBase ? false : warehouse,
@@ -345,7 +482,9 @@ setProductImagePreview("");
     <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
       <h2 className="text-lg font-black text-slate-950">3. Add Products</h2>
 
-      <div className={`mt-5 grid gap-4 ${isI5qDqBase ? "lg:grid-cols-[1fr_120px_120px_140px_140px]" : "lg:grid-cols-[1fr_120px]"}`}>
+      <div
+        className={`mt-5 grid gap-4 ${isI5qDqBase ? "lg:grid-cols-[1fr_120px_120px_140px_140px]" : "lg:grid-cols-[1fr_120px]"}`}
+      >
         <div className="relative">
           <label className="mb-2 block text-sm font-bold text-slate-700">
             Search SKU
@@ -424,34 +563,39 @@ setProductImagePreview("");
                 </p>
 
                 {!enableStockValidation && (
-                <button
-                  type="button"
-                  className="mt-4 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-black text-white"
-                  onClick={() => {
-                    const sku = query.trim();
-                    const defaultSupplier = getDefaultSupplierFromSku(sku);
+                  <button
+                    type="button"
+                    className="mt-4 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-black text-white"
+                    onClick={() => {
+                      const sku = query.trim();
+                      const defaultSupplier = getDefaultSupplierFromSku(sku);
 
-                    setNewProductSku(sku);
-                    setNewProductSupplier(defaultSupplier);
-                    setNewSupplierSku("");
-                    setNewProductCp("");
-                    setNewProductPrice("");
-                    setProductImage(null);
-                    setProductImagePreview("");
-                    setShowAddProductModal(true);
-                    setProductSaveSuccess("");
-setProductSaveError("");
-                  }}
-                >
-                  + Add New Product
-                </button>
+                      setNewProductSku(sku);
+                      setNewProductSupplier(defaultSupplier);
+                      setNewSupplierSku("");
+                      setNewProductCp("");
+                      setNewProductPrice("");
+                      setProductImage(null);
+                      setProductImagePreview("");
+                      setShowAddProductModal(true);
+                      setProductSaveSuccess("");
+                      setProductSaveError("");
+                    }}
+                  >
+                    + Add New Product
+                  </button>
                 )}
               </div>
             )}
         </div>
 
         {isI5qDqBase && (
-          <Input label="Size" value={size} onChange={(e) => setSize(e.target.value)} placeholder="Size" />
+          <Input
+            label="Size"
+            value={size}
+            onChange={(e) => setSize(e.target.value)}
+            placeholder="Size"
+          />
         )}
 
         <Input
@@ -463,29 +607,45 @@ setProductSaveError("");
         />
 
         {isI5qDqBase && (
-          <Input label="Single Price" type="number" min={0} value={singlePrice} onChange={(e) => setSinglePrice(e.target.value)} placeholder="0" />
+          <Input
+            label="Single Price"
+            type="number"
+            min={0}
+            value={singlePrice}
+            onChange={(e) => setSinglePrice(e.target.value)}
+            placeholder="0"
+          />
         )}
 
         {isI5qDqBase && (
-          <Input label="Pack Price" type="number" min={0} value={packPrice} onChange={(e) => setPackPrice(e.target.value)} placeholder="0" />
+          <Input
+            label="Pack Price"
+            type="number"
+            min={0}
+            value={packPrice}
+            onChange={(e) => setPackPrice(e.target.value)}
+            placeholder="0"
+          />
         )}
       </div>
 
       {!isI5qDqBase && (
-      <label className="mt-5 flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
-        <input
-          type="checkbox"
-          checked={warehouse}
-          onChange={(e) => setWarehouse(e.target.checked)}
-          className="h-5 w-5 accent-emerald-600"
-        />
-        <div>
-          <p className="text-sm font-black text-slate-800">
-            Already in Warehouse
-          </p>
-          <p className="text-xs text-slate-500">Supplier ko order nahi dena.</p>
-        </div>
-      </label>
+        <label className="mt-5 flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+          <input
+            type="checkbox"
+            checked={warehouse}
+            onChange={(e) => setWarehouse(e.target.checked)}
+            className="h-5 w-5 accent-emerald-600"
+          />
+          <div>
+            <p className="text-sm font-black text-slate-800">
+              Already in Warehouse
+            </p>
+            <p className="text-xs text-slate-500">
+              Supplier ko order nahi dena.
+            </p>
+          </div>
+        </label>
       )}
 
       <div className="mt-5 rounded-3xl border border-dashed border-slate-300 bg-slate-50 p-5">
@@ -519,7 +679,9 @@ setProductSaveError("");
               )}
 
               <p className="mt-1 text-sm text-slate-600">
-                {isI5qDqBase ? `${orderMode} • Stock ${selectedProduct.stock}` : `AED ${selectedProduct.price} • Stock ${selectedProduct.stock}`}
+                {isI5qDqBase
+                  ? `${orderMode} • Stock ${selectedProduct.stock}`
+                  : `AED ${selectedProduct.price} • Stock ${selectedProduct.stock}`}
               </p>
             </div>
           </div>
@@ -540,7 +702,6 @@ setProductSaveError("");
         Add Product
       </button>
 
-
       {showAddProductModal && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
           <div className="w-full max-w-2xl rounded-3xl bg-white p-6 shadow-2xl">
@@ -550,7 +711,8 @@ setProductSaveError("");
                   Add New Product
                 </h3>
                 <p className="mt-1 text-sm font-bold text-slate-500">
-                  Product table mein new SKU create karne ke liye details fill karein.
+                  Product table mein new SKU create karne ke liye details fill
+                  karein.
                 </p>
               </div>
 
@@ -578,41 +740,58 @@ setProductSaveError("");
                 placeholder="Product SKU"
               />
 
-              
-
               <Input
                 label="Supplier SKU"
                 value={newSupplierSku}
                 onChange={(e) => setNewSupplierSku(e.target.value)}
                 placeholder="Optional"
               />
-<label className="block md:col-span-2">
-  <span className="mb-2 block text-sm font-bold text-slate-700">
-    Product Image
-  </span>
+              <label className="block md:col-span-2">
+                <span className="mb-2 block text-sm font-bold text-slate-700">
+                  Product Image
+                </span>
 
-  <input
-    type="file"
-    accept="image/*"
-    onChange={(e) => {
-      const file = e.target.files?.[0];
+                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
 
-      if (!file) return;
+                      if (!file) return;
 
-      setProductImage(file);
-      setProductImagePreview(URL.createObjectURL(file));
-    }}
-    className="block w-full rounded-2xl border border-slate-200 bg-slate-50 p-3"
-  />
+                      setProductImage(file);
+                      setProductImagePreview(URL.createObjectURL(file));
+                    }}
+                    className="block w-full rounded-2xl border border-slate-200 bg-white p-3"
+                  />
 
-  {productImagePreview && (
-    <img
-      src={productImagePreview}
-      alt="Preview"
-      className="mt-3 h-40 rounded-2xl border object-contain"
-    />
-  )}
-</label>
+                  <p className="mt-3 text-sm font-bold text-slate-600">
+                    Ya image copy karke yahan click karein aur Ctrl + V press karein.
+                  </p>
+                </div>
+
+                {productImagePreview && (
+                  <div className="mt-3">
+                    <img
+                      src={productImagePreview}
+                      alt="Preview"
+                      className="h-40 rounded-2xl border object-contain"
+                    />
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setProductImage(null);
+                        setProductImagePreview("");
+                      }}
+                      className="mt-3 rounded-xl bg-red-50 px-4 py-2 text-sm font-black text-red-700"
+                    >
+                      Remove Image
+                    </button>
+                  </div>
+                )}
+              </label>
               <Input
                 label="CP"
                 type="number"
@@ -628,20 +807,18 @@ setProductSaveError("");
                 onChange={(e) => setNewProductPrice(e.target.value)}
                 placeholder="0"
               />
-
-              
             </div>
-{productSaveError && (
-  <div className="mt-5 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm font-bold text-red-700">
-    {productSaveError}
-  </div>
-)}
+            {productSaveError && (
+              <div className="mt-5 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm font-bold text-red-700">
+                {productSaveError}
+              </div>
+            )}
 
-{productSaveSuccess && (
-  <div className="mt-5 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-bold text-emerald-700">
-    {productSaveSuccess}
-  </div>
-)}
+            {productSaveSuccess && (
+              <div className="mt-5 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-bold text-emerald-700">
+                {productSaveSuccess}
+              </div>
+            )}
             <div className="mt-6 flex gap-3">
               <button
                 type="button"
@@ -652,23 +829,27 @@ setProductSaveError("");
               </button>
 
               <button
-  type="button"
-  onClick={saveNewProduct}
-  disabled={savingProduct || !!productSaveSuccess}
-  className="h-12 flex-1 rounded-2xl bg-gradient-to-r from-emerald-600 to-blue-600 text-sm font-black text-white shadow-lg disabled:cursor-not-allowed disabled:opacity-50"
->
-  {savingProduct
-  ? "Saving..."
-  : productSaveSuccess
-  ? "Saved"
-  : "Save Product"}
-</button>
+                type="button"
+                onClick={saveNewProduct}
+                disabled={savingProduct || !!productSaveSuccess}
+                className="h-12 flex-1 rounded-2xl bg-gradient-to-r from-emerald-600 to-blue-600 text-sm font-black text-white shadow-lg disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {savingProduct
+                  ? "Saving..."
+                  : productSaveSuccess
+                    ? "Saved"
+                    : "Save Product"}
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      <OrderItemsGrid items={items} onChange={onChange} isI5qDqBase={isI5qDqBase} />
+      <OrderItemsGrid
+        items={items}
+        onChange={onChange}
+        isI5qDqBase={isI5qDqBase}
+      />
     </div>
   );
 }

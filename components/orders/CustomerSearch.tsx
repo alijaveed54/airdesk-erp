@@ -57,6 +57,7 @@ export default function CustomerSearch({
   const [areaName, setAreaName] = useState("");
   const [cityName, setCityName] = useState("");
   const [address, setAddress] = useState("");
+  const [googleMapLocation, setGoogleMapLocation] = useState("");
   const [areaSearch, setAreaSearch] = useState("");
   const customer = selectedCustomer;  
 
@@ -138,12 +139,23 @@ export default function CustomerSearch({
   const filteredCities =
     areaName && !cityName ? getCitiesByArea(areaName) : cities;
 
+  const normalizedBaseName = selectedBaseName.trim().toLowerCase();
+
   const isDohaBase =
-    selectedBaseName.toLowerCase().includes("doha") ||
-    selectedBaseName.toLowerCase().includes("qatar") ||
-    selectedBaseName.toLowerCase().includes("fab") ||
-    selectedBaseName.toLowerCase().includes("i5q") ||
-    selectedBaseName.toLowerCase().includes("dq");
+    normalizedBaseName.includes("doha") ||
+    normalizedBaseName.includes("qatar") ||
+    normalizedBaseName.includes("fab") ||
+    normalizedBaseName.includes("i5q") ||
+    normalizedBaseName.includes("dq");
+
+  const isI5qDqBase =
+    normalizedBaseName.includes("i5q") ||
+    /(^|[^a-z0-9])dq([^a-z0-9]|$)/.test(normalizedBaseName);
+
+  const supportsGoogleMapLocation =
+    (normalizedBaseName.includes("fab") &&
+      normalizedBaseName.includes("doha")) ||
+    isI5qDqBase;
 
   useEffect(() => {
     async function loadSelectedBase() {
@@ -177,6 +189,12 @@ export default function CustomerSearch({
       setAreaSearch("");
     }
   }, [isDohaBase]);
+
+  useEffect(() => {
+    if (!supportsGoogleMapLocation) {
+      setGoogleMapLocation("");
+    }
+  }, [supportsGoogleMapLocation]);
 
   useEffect(() => {
     const value = query.trim();
@@ -248,6 +266,9 @@ export default function CustomerSearch({
           contactNo: query.trim(),
           customerName: customerName.trim(),
           address: address.trim(),
+          ...(supportsGoogleMapLocation && {
+            googleMapLocation: googleMapLocation.trim(),
+          }),
           ...(!isDohaBase && {
             areaName: areaName.trim(),
             cityName: cityName.trim(),
@@ -492,6 +513,15 @@ export default function CustomerSearch({
           )}
 
           <Input label="Address" value={address} onChange={(e) => setAddress(e.target.value)} />
+
+          {supportsGoogleMapLocation && (
+            <Input
+              label="Location"
+              value={googleMapLocation}
+              onChange={(e) => setGoogleMapLocation(e.target.value)}
+              placeholder="Paste Google Maps location or link"
+            />
+          )}
 
           <button
             type="button"
