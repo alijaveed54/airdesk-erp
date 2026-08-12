@@ -2019,14 +2019,8 @@ export async function processBatchQueue(
     );
 
   if (activeProcessor) {
-    return {
-      busy: true,
-      processed: 0,
-      completed: 0,
-      retried: 0,
-      failed: 0,
-      jobs: [],
-    };
+  console.log("Ignoring old processor lock");
+}
   }
 
   activeProcessor =
