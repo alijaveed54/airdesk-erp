@@ -6,9 +6,33 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 
-export async function GET(){
+export async function GET(req: Request){
 
   try{
+
+    const { searchParams } = new URL(req.url);
+
+    const key =
+      searchParams.get("key");
+
+
+    if(
+      !process.env.CRON_SECRET ||
+      key !== process.env.CRON_SECRET
+    ){
+
+      return NextResponse.json(
+        {
+          success:false,
+          message:"Unauthorized"
+        },
+        {
+          status:401
+        }
+      );
+
+    }
+
 
     const result =
       await processBatchQueue(3);
