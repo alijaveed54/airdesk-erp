@@ -23,57 +23,81 @@ type UserSession = {
   fullName: string;
   role: string;
   permissions: Permission[];
+  selectedBase?: Permission;
 };
 
 export default function BaseSelectPage() {
   const router = useRouter();
+
   const [user, setUser] = useState<UserSession | null>(null);
-  const [selectedBase, setSelectedBase] = useState("");
+  const [selectedBaseId, setSelectedBaseId] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
   async function loadSession() {
     setLoading(true);
 
-    const res = await fetch("/api/auth/me");
-    const data = await res.json();
+    try {
+      const res = await fetch("/api/auth/me", {
+        cache: "no-store",
+      });
 
-    if (!res.ok || !data.success) {
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        router.push("/login");
+        return;
+      }
+
+      setUser(data.user);
+
+      const currentBaseId =
+        data.user.selectedBase?.baseId ||
+        data.user.permissions?.[0]?.baseId ||
+        "";
+
+      setSelectedBaseId(currentBaseId);
+    } catch (error) {
+      console.error("Load session failed:", error);
       router.push("/login");
-      return;
+    } finally {
+      setLoading(false);
     }
-
-    setUser(data.user);
-    setSelectedBase(data.user.permissions?.[0]?.baseName || "");
-    setLoading(false);
   }
 
   async function continueToERP() {
-    if (!selectedBase) {
+    if (!selectedBaseId) {
       alert("Please select a company/base.");
       return;
     }
 
     setSaving(true);
 
-    const res = await fetch("/api/auth/select-base", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ baseName: selectedBase }),
-    });
+    try {
+      const res = await fetch("/api/auth/select-base", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          baseId: selectedBaseId,
+        }),
+      });
 
-    const data = await res.json();
+      const data = await res.json();
 
-    if (res.ok && data.success) {
-      router.push(data.redirectTo || "/dashboard");
-      router.refresh();
-    } else {
-      alert(data.message || "Base selection failed");
+      if (res.ok && data.success) {
+        router.push(data.redirectTo || "/dashboard");
+        router.refresh();
+      } else {
+        alert(data.message || "Base selection failed");
+      }
+    } catch (error) {
+      console.error("Base selection error:", error);
+      alert("Base selection failed");
+    } finally {
+      setSaving(false);
     }
-
-    setSaving(false);
   }
 
   useEffect(() => {
@@ -96,46 +120,62 @@ export default function BaseSelectPage() {
     <div className="flex min-h-screen items-center justify-center bg-slate-100 p-4">
       <div className="w-full max-w-2xl rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
         <div className="mb-6">
-          <h1 className="text-3xl font-black text-slate-950">Select Company</h1>
+          <h1 className="text-3xl font-black text-slate-950">
+            Select Company
+          </h1>
+
           <p className="mt-2 text-sm font-bold text-slate-500">
-            Welcome {user?.fullName || user?.username}. Choose the company/base you want to use.
+            Welcome {user?.fullName || user?.username}. Choose the company/base
+            you want to use.
           </p>
         </div>
 
         <div className="space-y-3">
-          {permissions.map((permission) => (
-            <button
-              key={permission.baseName}
-              type="button"
-              onClick={() => setSelectedBase(permission.baseName)}
-              className={`w-full rounded-2xl border p-4 text-left ${
-                selectedBase === permission.baseName
-                  ? "border-blue-500 bg-blue-50"
-                  : "border-slate-200 bg-white hover:bg-slate-50"
-              }`}
-            >
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <p className="text-lg font-black text-slate-950">{permission.baseName}</p>
-                  <p className="mt-1 text-xs font-bold text-slate-500">
-                    {permission.canReports ? "Reports" : ""}
-                    {permission.canEdit ? " · Edit" : ""}
-                    {permission.canDispatch ? " · Dispatch" : ""}
-                    {permission.canReceive ? " · Receive" : ""}
-                    {permission.supplierCode ? ` · Supplier: ${permission.supplierCode}` : ""}
-                  </p>
-                </div>
+          {permissions.map((permission) => {
+            const isSelected =
+              selectedBaseId === permission.baseId;
 
-                <div
-                  className={`h-5 w-5 rounded-full border ${
-                    selectedBase === permission.baseName
-                      ? "border-blue-600 bg-blue-600"
-                      : "border-slate-300"
-                  }`}
-                />
-              </div>
-            </button>
-          ))}
+            return (
+              <button
+                key={permission.baseId}
+                type="button"
+                onClick={() =>
+                  setSelectedBaseId(permission.baseId)
+                }
+                className={`w-full rounded-2xl border p-4 text-left ${
+                  isSelected
+                    ? "border-blue-500 bg-blue-50"
+                    : "border-slate-200 bg-white hover:bg-slate-50"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className="text-lg font-black text-slate-950">
+                      {permission.baseName}
+                    </p>
+
+                    <p className="mt-1 text-xs font-bold text-slate-500">
+                      {permission.canReports ? "Reports" : ""}
+                      {permission.canEdit ? " · Edit" : ""}
+                      {permission.canDispatch ? " · Dispatch" : ""}
+                      {permission.canReceive ? " · Receive" : ""}
+                      {permission.supplierCode
+                        ? ` · Supplier: ${permission.supplierCode}`
+                        : ""}
+                    </p>
+                  </div>
+
+                  <div
+                    className={`h-5 w-5 rounded-full border ${
+                      isSelected
+                        ? "border-blue-600 bg-blue-600"
+                        : "border-slate-300"
+                    }`}
+                  />
+                </div>
+              </button>
+            );
+          })}
         </div>
 
         <button

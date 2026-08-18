@@ -24,6 +24,8 @@ export default function LoginForm() {
     });
 
     const data = await res.json();
+    console.log("LOGIN STATUS:", res.status);
+console.log("LOGIN RESPONSE:", data);
 
     if (!res.ok || !data.success) {
       setMessage(data.message || "Login failed");

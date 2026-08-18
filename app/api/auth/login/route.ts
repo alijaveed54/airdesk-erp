@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import {
   BasePermission,
   createSessionToken,
+  createPermissionsToken,
   getBool,
   getCookieName,
+  getPermissionsCookieName,
   getFirstValue,
   normalizeRole,
 } from "@/lib/auth";
@@ -176,27 +178,31 @@ export async function POST(request: Request) {
 
     const currentLoginCount = Number(userFields["Login Count"] || 0);
 
-    await fetch(
-      `https://api.airtable.com/v0/${AUTH_AIRTABLE_BASE_ID}/${encodeURIComponent("ERP Users")}`,
-      {
-        method: "PATCH",
-        headers: {
-          Authorization: `Bearer ${AUTH_AIRTABLE_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          records: [
-            {
-              id: user.id,
-              fields: {
-                "Last Login": new Date().toISOString(),
-                "Login Count": currentLoginCount + 1,
-              },
+try {
+  await fetch(
+    `https://api.airtable.com/v0/${AUTH_AIRTABLE_BASE_ID}/${encodeURIComponent("ERP Users")}`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${AUTH_AIRTABLE_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        records: [
+          {
+            id: user.id,
+            fields: {
+              "Last Login": new Date().toISOString(),
+              "Login Count": currentLoginCount + 1,
             },
-          ],
-        }),
-      }
-    );
+          },
+        ],
+      }),
+    }
+  );
+} catch (error) {
+  console.error("Login stats update failed:", error);
+}
 
     const session = {
   username,
@@ -216,12 +222,24 @@ export async function POST(request: Request) {
     });
 
     response.cookies.set(getCookieName(), createSessionToken(session), {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 7,
-    });
+  httpOnly: true,
+  sameSite: "lax",
+  secure: process.env.NODE_ENV === "production",
+  path: "/",
+  maxAge: 60 * 60 * 24 * 7,
+});
+
+response.cookies.set(
+  getPermissionsCookieName(),
+  createPermissionsToken(session),
+  {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: 60 * 60 * 24 * 7,
+  }
+);
 
     return response;
   } catch (error) {
