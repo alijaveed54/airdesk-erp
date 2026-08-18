@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getCookieName } from "@/lib/auth";
 
 function decodeSession(token?: string) {
   if (!token) return null;
@@ -36,7 +37,9 @@ export function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
-  const session = decodeSession(request.cookies.get("erp_session")?.value);
+  const session = decodeSession(
+    request.cookies.get(getCookieName())?.value
+  );
 
   if (!session) {
     return NextResponse.redirect(new URL("/login", request.url));
