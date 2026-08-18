@@ -741,6 +741,18 @@ function pendingAgeDays(orderDate: unknown) {
   return Math.floor((todayMs - orderMs) / 86_400_000);
 }
 
+function pendingCutoffExclusiveDateKey(minAgeDays: number) {
+  const todayKey = formatKarachiDate(new Date().toISOString());
+  const todayMs = dateKeyToUtcMs(todayKey);
+  if (!Number.isFinite(todayMs)) return "";
+
+  const safeAge = Math.max(0, Math.floor(minAgeDays));
+  const exclusiveMs = todayMs - Math.max(0, safeAge - 1) * 86_400_000;
+  const date = new Date(exclusiveMs);
+
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+}
+
 function isYes(value: unknown) {
   if (value === true) return true;
   const normalized = readableText(value).trim().toLowerCase();
@@ -903,7 +915,10 @@ async function fetchPendingSource({
     };
   }
 
-  const formula = `AND(LOWER({${orderStatusField.name}} & '')='order received',{${orderDateField.name}}!='')`;
+  const cutoffExclusiveDateKey = pendingCutoffExclusiveDateKey(minAgeDays);
+  const formula = cutoffExclusiveDateKey
+    ? `AND(LOWER({${orderStatusField.name}} & '')='order received',{${orderDateField.name}}!='',IS_BEFORE({${orderDateField.name}},DATETIME_PARSE('${cutoffExclusiveDateKey}')))`
+    : `AND(LOWER({${orderStatusField.name}} & '')='order received',{${orderDateField.name}}!='')`;
   const records: any[] = [];
   let offset = "";
 

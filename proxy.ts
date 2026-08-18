@@ -28,6 +28,8 @@ export function proxy(request: NextRequest) {
     pathname.startsWith("/privacy-policy") ||
     pathname.startsWith("/stock/doha") ||
     pathname.startsWith("/api/public/stock/doha") ||
+    pathname.startsWith("/stock/uae") ||
+    pathname.startsWith("/api/public/stock/uae") ||
     pathname === "/gallery" ||
     pathname.startsWith("/api/public/r2/gallery")
   ) {
@@ -81,6 +83,10 @@ export function proxy(request: NextRequest) {
   }
 
   if (pathname.startsWith("/inventory") && !hasPermission(session, "canInventory")) {
+    return NextResponse.redirect(new URL("/dashboard", request.url));
+  }
+
+  if (pathname.startsWith("/admin/api-usage")) {
     return NextResponse.redirect(new URL("/dashboard", request.url));
   }
 

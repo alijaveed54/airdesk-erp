@@ -19,6 +19,7 @@ type OrderGroup = {
   salesPerson?: string;
   totalValue?: number;
   currency?: string;
+  dispatchDate?: string;
 
   totalQty: number;
   totalItems: number;
@@ -49,6 +50,7 @@ const [customerName, setCustomerName] = useState("");
   const [expandedOrders, setExpandedOrders] = useState<string[]>([]);
   const [imageLoadedOrders, setImageLoadedOrders] = useState<string[]>([]);
   const [statusOptions, setStatusOptions] = useState<string[]>([]);
+  const [orderImages, setOrderImages] = useState<Record<string, any[]>>({});
 const [storeOptions, setStoreOptions] = useState<string[]>([]);
 const [isI5qDqBase, setIsI5qDqBase] = useState(false);
 const [selectedBaseName, setSelectedBaseName] = useState("");
@@ -165,13 +167,32 @@ function toggleOrder(orderNo: string) {
   );
 }
 
-function toggleImages(orderNo: string) {
-  setImageLoadedOrders((prev) =>
-    prev.includes(orderNo)
-      ? prev.filter((item) => item !== orderNo)
-      : [...prev, orderNo]
+async function loadOrderImages(orderNo: string) {
+  const alreadyLoaded = orderImages[orderNo];
+
+  if (alreadyLoaded) {
+    setOrderImages((prev) => {
+      const copy = { ...prev };
+      delete copy[orderNo];
+      return copy;
+    });
+    return;
+  }
+
+  const res = await fetch(
+    `/api/orders/order-images?orderNo=${encodeURIComponent(orderNo)}`
   );
+
+  const data = await res.json();
+
+  if (data.success) {
+    setOrderImages((prev) => ({
+      ...prev,
+      [orderNo]: data.items || [],
+    }));
+  }
 }
+
   useEffect(() => {
     async function initializePage() {
       setLoading(true);
@@ -516,9 +537,9 @@ function toggleImages(orderNo: string) {
 <button
   type="button"
   onClick={(e) => {
-    e.stopPropagation();
-    toggleImages(order.orderNo);
-  }}
+  e.stopPropagation();
+  loadOrderImages(order.orderNo);
+}}
   className="mb-2 ml-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-black text-amber-700 hover:bg-amber-100"
 >
   {imageLoadedOrders.includes(order.orderNo) ? "Hide Images" : "Load Images"}
@@ -590,6 +611,7 @@ function toggleImages(orderNo: string) {
                             <th className="px-4 py-3 text-left">Dispatch From In</th>
                             <th className="px-4 py-3 text-left">Received Date</th>
                             <th className="px-4 py-3 text-left">Bill No</th>
+                            <th className="px-4 py-3 text-left">Item Value</th>
                           </>
                         )}
                       </tr>
@@ -607,28 +629,36 @@ function toggleImages(orderNo: string) {
                           }`}
                         >
                           <td className="px-4 py-3">
-                            {imageLoadedOrders.includes(order.orderNo) ? (
-                              item.fields.image?.[0]?.url ? (
+                            {orderImages[order.orderNo]
+                              ?.find((img:any) => img.id === item.id)
+                              ?.image?.[0]?.url ? (
                                 <button
                                   type="button"
-                                  onClick={() => setEnlargedImage(item.fields.image[0].url)}
+                                  onClick={() =>
+                                    setEnlargedImage(
+                                      orderImages[order.orderNo]
+                                        ?.find((img:any) => img.id === item.id)
+                                        ?.image?.[0]?.url || null
+                                    )
+                                  }
                                   className="block rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                   title="Click to enlarge image"
                                 >
                                   <img
-                                    src={item.fields.image[0].url}
+                                    src={
+                                      orderImages[order.orderNo]
+                                        ?.find((img:any) => img.id === item.id)
+                                        ?.image?.[0]?.url
+                                    }
                                     alt={item.fields["Item Code"] || "Product image"}
                                     className="h-16 w-12 cursor-zoom-in rounded-lg object-cover"
                                   />
                                 </button>
                               ) : (
-                                "-"
-                              )
-                            ) : (
-                              <span className="text-xs font-bold text-slate-400">
-                                Not loaded
-                              </span>
-                            )}
+                                <span className="text-xs font-bold text-slate-400">
+                                  Not loaded
+                                </span>
+                              )}
                           </td>
                           <td className="px-4 py-3 font-bold">{item.fields["Item Code"]}</td>
                           {isI5qDqBase ? (

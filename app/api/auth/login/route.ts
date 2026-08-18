@@ -199,14 +199,15 @@ export async function POST(request: Request) {
     );
 
     const session = {
-      username,
-      fullName: String(userFields["Full Name"] || username),
-      role,
-      superAdmin: getBool(userFields["Super Admin"]),
-      defaultBase: String(userFields["Default Base"] || ""),
-      permissions,
-      selectedBase: permissions[0],
-    };
+  username,
+  fullName: String(userFields["Full Name"] || username),
+  role,
+  superAdmin: getBool(userFields["Super Admin"]),
+  defaultBase: String(userFields["Default Base"] || ""),
+  permissions,
+  availableBases: permissions,
+  selectedBase: permissions[0],
+};
 
     const response = NextResponse.json({
       success: true,

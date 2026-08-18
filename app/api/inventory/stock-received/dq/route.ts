@@ -64,7 +64,12 @@ function findWritableField(
   return undefined;
 }
 
+const schemaCache = new Map<string, SchemaTable[]>();
+
 async function loadSchema(baseId: string, token: string) {
+  const cached = schemaCache.get(baseId);
+  if (cached) return cached;
+
   const response = await fetch(
     `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(
       baseId
@@ -87,7 +92,9 @@ async function loadSchema(baseId: string, token: string) {
     );
   }
 
-  return (data.tables || []) as SchemaTable[];
+  const tables = (data.tables || []) as SchemaTable[];
+  schemaCache.set(baseId, tables);
+  return tables;
 }
 
 function resolveStockReceivedSetup(tables: SchemaTable[]) {
@@ -214,35 +221,61 @@ function resolveStockReceivedSetup(tables: SchemaTable[]) {
   };
 }
 
-async function searchProducts({
+async function loadProductAttachmentUrls({
   baseId,
   token,
-  productTable,
   stockReceivedTable,
   linkField,
   attachmentsField,
+  products,
   primaryFieldName,
-  search,
 }: {
   baseId: string;
   token: string;
-  productTable: SchemaTable;
   stockReceivedTable: SchemaTable;
   linkField: SchemaField;
   attachmentsField?: SchemaField;
+  products: any[];
   primaryFieldName: string;
-  search: string;
 }) {
-  // DQ images are sourced from Stock Received -> Attachments.
-  // Product-table attachment fields are intentionally not used here.
   const attachmentUrlByProductId = new Map<string, string>();
 
-  if (attachmentsField) {
+  if (!attachmentsField || products.length === 0) {
+    return attachmentUrlByProductId;
+  }
+
+  const productIdBySku = new Map<string, string>();
+
+  for (const product of products) {
+    const sku = String(product.fields?.[primaryFieldName] || "").trim();
+    if (!sku || !product.id) continue;
+    productIdBySku.set(normalize(sku), String(product.id));
+  }
+
+  const skuValues = Array.from(productIdBySku.keys());
+
+  // Query only Stock Received rows linked to the currently visible products.
+  // This replaces the old full-table attachment scan on every search.
+  for (let start = 0; start < skuValues.length; start += 15) {
+    const batch = skuValues.slice(start, start + 15);
+    if (batch.length === 0) continue;
+
+    const formulas = batch.map(
+      (sku) =>
+        `FIND(LOWER('|${escapeFormulaValue(
+          sku
+        )}|'),LOWER('|'&ARRAYJOIN({${linkField.name}},'|')&'|'))>0`
+    );
+
+    const filterByFormula =
+      formulas.length === 1 ? formulas[0] : `OR(${formulas.join(",")})`;
+
     let offset = "";
 
     do {
       const stockParams = new URLSearchParams();
       stockParams.set("pageSize", "100");
+      stockParams.set("filterByFormula", filterByFormula);
       stockParams.append("fields[]", linkField.name);
       stockParams.append("fields[]", attachmentsField.name);
 
@@ -282,7 +315,6 @@ async function searchProducts({
           : [];
 
         const firstAttachment = attachments[0];
-
         const imageUrl =
           firstAttachment?.thumbnails?.large?.url ||
           firstAttachment?.thumbnails?.full?.url ||
@@ -294,15 +326,11 @@ async function searchProducts({
         for (const productId of linkedProductIds) {
           const normalizedProductId = String(productId || "");
 
-          // Keep the first available image found for each product.
           if (
             normalizedProductId &&
             !attachmentUrlByProductId.has(normalizedProductId)
           ) {
-            attachmentUrlByProductId.set(
-              normalizedProductId,
-              imageUrl
-            );
+            attachmentUrlByProductId.set(normalizedProductId, imageUrl);
           }
         }
       }
@@ -311,6 +339,28 @@ async function searchProducts({
     } while (offset);
   }
 
+  return attachmentUrlByProductId;
+}
+
+async function searchProducts({
+  baseId,
+  token,
+  productTable,
+  stockReceivedTable,
+  linkField,
+  attachmentsField,
+  primaryFieldName,
+  search,
+}: {
+  baseId: string;
+  token: string;
+  productTable: SchemaTable;
+  stockReceivedTable: SchemaTable;
+  linkField: SchemaField;
+  attachmentsField?: SchemaField;
+  primaryFieldName: string;
+  search: string;
+}) {
   const params = new URLSearchParams();
   params.set("pageSize", "30");
   params.append("fields[]", primaryFieldName);
@@ -324,6 +374,7 @@ async function searchProducts({
     );
   }
 
+  // Fetch the visible products first. Only these products need image lookups.
   const response = await fetch(
     airtableUrl(baseId, productTable.name, params),
     {
@@ -342,13 +393,22 @@ async function searchProducts({
     );
   }
 
-  return (data.records || []).map((record: any) => ({
+  const products = data.records || [];
+
+  const attachmentUrlByProductId = await loadProductAttachmentUrls({
+    baseId,
+    token,
+    stockReceivedTable,
+    linkField,
+    attachmentsField,
+    products,
+    primaryFieldName,
+  });
+
+  return products.map((record: any) => ({
     id: record.id,
-    sku: String(
-      record.fields?.[primaryFieldName] || ""
-    ).trim(),
-    imageUrl:
-      attachmentUrlByProductId.get(record.id) || "",
+    sku: String(record.fields?.[primaryFieldName] || "").trim(),
+    imageUrl: attachmentUrlByProductId.get(record.id) || "",
   }));
 }
 

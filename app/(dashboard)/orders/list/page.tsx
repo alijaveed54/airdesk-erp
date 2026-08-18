@@ -20,6 +20,24 @@ type InlineDraft = {
   courier: string;
 };
 
+type ReadyProcessReportOrder = {
+  orderNo: string;
+  formatted: string;
+};
+
+type ReadyProcessReportResponse = {
+  success: boolean;
+  message?: string;
+  orders?: ReadyProcessReportOrder[];
+};
+
+type ReadyProcessActionResponse = {
+  success: boolean;
+  message?: string;
+  processedOrderNos?: string[];
+  skippedOrderNos?: string[];
+};
+
 function getCustomerName(order: OrderRecord) {
   return order.fields.Consignee?.[0] ?? "-";
 }
@@ -347,6 +365,9 @@ export default function OrdersListPage() {
   const [bulkSaving, setBulkSaving] = useState(false);
   const [downloadingDriverSheet, setDownloadingDriverSheet] = useState(false);
   const [downloadingCourierFiles, setDownloadingCourierFiles] = useState(false);
+  const [processingReadyOrderId, setProcessingReadyOrderId] = useState("");
+  const [bulkProcessingReady, setBulkProcessingReady] = useState(false);
+  const [copyingSelectedReady, setCopyingSelectedReady] = useState(false);
   const [baseName, setBaseName] = useState("");
   const [userRole, setUserRole] = useState("");
   const [movingOrderId, setMovingOrderId] = useState("");
@@ -764,6 +785,194 @@ export default function OrdersListPage() {
       normalizedBaseName.trim() === "bs"
     );
   }, [baseName]);
+
+  const supportsCourierDownload = useMemo(() => {
+    const normalizedBaseName = baseName.trim().toLowerCase();
+
+    return (
+      isBSOrderEntry ||
+      normalizedBaseName.includes("tatlumput") ||
+      normalizedBaseName.includes("siyam") ||
+      normalizedBaseName === "tat" ||
+      normalizedBaseName === "ts" ||
+      normalizedBaseName.startsWith("ts ")
+    );
+  }, [baseName, isBSOrderEntry]);
+
+  function selectedOrderNumbers() {
+    const selectedIds = new Set(selectedRows);
+
+    return orders
+      .filter((order) => selectedIds.has(order.id))
+      .map((order) => String(getOrderNo(order) || "").trim())
+      .filter((orderNo) => orderNo && orderNo !== "-");
+  }
+
+  async function processReadyOrderNumbers(
+    orderNos: string[],
+    rowOrderId = "",
+  ) {
+    if (!isBSOrderEntry) {
+      alert("Ready-to-Process action is available only in BS Order Entry.");
+      return;
+    }
+
+    const uniqueOrderNos = Array.from(
+      new Set(orderNos.map((value) => String(value || "").trim()).filter(Boolean)),
+    );
+
+    if (uniqueOrderNos.length === 0) {
+      alert("Please select at least one order.");
+      return;
+    }
+
+    if (rowOrderId) {
+      setProcessingReadyOrderId(rowOrderId);
+    } else {
+      setBulkProcessingReady(true);
+    }
+
+    try {
+      const response = await fetch("/api/reports/ready-to-process", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orderNos: uniqueOrderNos,
+          requireReady: true,
+        }),
+      });
+      const data = (await response.json().catch(() => null)) as
+        | ReadyProcessActionResponse
+        | null;
+
+      if (!response.ok || !data?.success) {
+        throw new Error(
+          data?.message ||
+            "Selected order Ready-to-Process rule pass nahi karta.",
+        );
+      }
+
+      const processedOrderNos = new Set(
+        (data.processedOrderNos || []).map((value) =>
+          String(value || "").trim().toLowerCase(),
+        ),
+      );
+
+      if (processedOrderNos.size > 0) {
+        setOrders((current) =>
+          current.map((order) => {
+            const orderNo = String(getOrderNo(order) || "")
+              .trim()
+              .toLowerCase();
+
+            if (!processedOrderNos.has(orderNo)) return order;
+
+            return {
+              ...order,
+              fields: {
+                ...order.fields,
+                Processing: "Add",
+                __readyProcessStatus: "",
+              },
+            };
+          }),
+        );
+
+        setSelectedRows((current) =>
+          current.filter((recordId) => {
+            const order = orders.find((item) => item.id === recordId);
+            if (!order) return true;
+            return !processedOrderNos.has(
+              String(getOrderNo(order) || "").trim().toLowerCase(),
+            );
+          }),
+        );
+      }
+
+      const skippedCount = Array.isArray(data.skippedOrderNos)
+        ? data.skippedOrderNos.length
+        : Math.max(0, uniqueOrderNos.length - processedOrderNos.size);
+
+      alert(
+        skippedCount > 0
+          ? `${data.message || `${processedOrderNos.size} order(s) sent to Processing`}. ${skippedCount} selected order(s) Ready-to-Process rule pass nahi karte, is liye skip kiye gaye.`
+          : data.message || `${processedOrderNos.size} order(s) sent to Processing`,
+      );
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Ready-to-Process action failed",
+      );
+    } finally {
+      setProcessingReadyOrderId("");
+      setBulkProcessingReady(false);
+    }
+  }
+
+  async function copySelectedReadyOrders() {
+    if (!isBSOrderEntry) return;
+
+    const selectedNos = selectedOrderNumbers();
+    if (selectedNos.length === 0) {
+      alert("Please select at least one order.");
+      return;
+    }
+
+    setCopyingSelectedReady(true);
+
+    try {
+      const response = await fetch("/api/reports/ready-to-process", {
+        cache: "no-store",
+      });
+      const data = (await response.json().catch(() => null)) as
+        | ReadyProcessReportResponse
+        | null;
+
+      if (!response.ok || !data?.success) {
+        throw new Error(
+          data?.message || "Ready-to-Process details load failed",
+        );
+      }
+
+      const readyByOrderNo = new Map(
+        (data.orders || []).map((order) => [
+          String(order.orderNo || "").trim().toLowerCase(),
+          order,
+        ]),
+      );
+
+      const formatted = selectedNos
+        .map((orderNo) =>
+          readyByOrderNo.get(orderNo.trim().toLowerCase())?.formatted || "",
+        )
+        .filter(Boolean);
+
+      if (formatted.length === 0) {
+        alert(
+          "Selected orders mein koi order current Ready-to-Process rule pass nahi karta.",
+        );
+        return;
+      }
+
+      await navigator.clipboard.writeText(formatted.join("\n"));
+
+      const skipped = selectedNos.length - formatted.length;
+      alert(
+        skipped > 0
+          ? `${formatted.length} ready selected order(s) copied. ${skipped} non-ready order(s) skip hue.`
+          : `${formatted.length} selected ready order(s) copied.`,
+      );
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Selected ready orders copy failed",
+      );
+    } finally {
+      setCopyingSelectedReady(false);
+    }
+  }
 
   const displayedOrders = useMemo(() => {
     if (!isBSOrderEntry) {
@@ -1298,6 +1507,42 @@ export default function OrdersListPage() {
                 Update Courier
               </button>
 
+              {isBSOrderEntry && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => void copySelectedReadyOrders()}
+                    disabled={
+                      selectedRows.length === 0 ||
+                      copyingSelectedReady ||
+                      bulkProcessingReady ||
+                      bulkSaving
+                    }
+                    className="h-10 rounded-xl border border-violet-300 bg-violet-50 px-4 text-sm font-black text-violet-700 disabled:opacity-50"
+                  >
+                    {copyingSelectedReady ? "Copying..." : "Copy Selected Ready"}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void processReadyOrderNumbers(selectedOrderNumbers())
+                    }
+                    disabled={
+                      selectedRows.length === 0 ||
+                      bulkProcessingReady ||
+                      copyingSelectedReady ||
+                      bulkSaving
+                    }
+                    className="h-10 rounded-xl border border-emerald-700 bg-emerald-600 px-4 text-sm font-black text-white disabled:opacity-50"
+                  >
+                    {bulkProcessingReady
+                      ? "Processing Selected..."
+                      : "Process Selected Ready"}
+                  </button>
+                </>
+              )}
+
               <button
                 type="button"
                 onClick={dispatchReadyOrders}
@@ -1307,7 +1552,7 @@ export default function OrdersListPage() {
                 Dispatch Ready Orders
               </button>
 
-              {isBSOrderEntry && (
+              {supportsCourierDownload && (
                 <button
                   type="button"
                   onClick={downloadCourierFiles}
@@ -1653,6 +1898,28 @@ export default function OrdersListPage() {
                                 className="flex h-10 w-10 items-center justify-center rounded-xl border border-amber-400 bg-amber-50 text-lg font-black text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
                               >
                                 ⚡
+                              </button>
+                            )}
+
+                            {isBSOrderEntry && !isSupplier && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void processReadyOrderNumbers(
+                                    [String(getOrderNo(order) || "")],
+                                    order.id,
+                                  )
+                                }
+                                disabled={
+                                  processingReadyOrderId === order.id ||
+                                  bulkProcessingReady ||
+                                  Boolean(savingKey)
+                                }
+                                title="Apply Ready-to-Process rule; process only if eligible"
+                                aria-label="Process order if Ready to Process"
+                                className="flex h-10 w-10 items-center justify-center rounded-xl border border-emerald-700 bg-emerald-600 text-base font-black text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                {processingReadyOrderId === order.id ? "⏳" : "▶"}
                               </button>
                             )}
 

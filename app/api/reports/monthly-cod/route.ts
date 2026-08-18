@@ -11,6 +11,15 @@ type Base = {
 type Field = { id: string; name: string; type?: string };
 type Table = { id: string; name: string; fields?: Field[] };
 
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
+let configuredBasesCache: { bases: Base[]; expiresAt: number } | null = null;
+const schemaCache = new Map<
+  string,
+  { tables: Table[]; expiresAt: number }
+>();
+const schemaRequestCache = new Map<string, Promise<Table[]>>();
+
 const norm = (value: unknown) =>
   String(value ?? "")
     .trim()
@@ -79,6 +88,11 @@ const token = (base: Base) =>
   "";
 
 async function loadConfiguredBases(): Promise<Base[]> {
+  const cached = configuredBasesCache;
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.bases;
+  }
+
   const authToken =
     process.env.AUTH_AIRTABLE_TOKEN || process.env.AIRTABLE_TOKEN || "";
   const authBaseId = process.env.AUTH_AIRTABLE_BASE_ID || "";
@@ -103,7 +117,7 @@ async function loadConfiguredBases(): Promise<Base[]> {
     throw new Error(data?.error?.message || "ERP Bases load failed");
   }
 
-  return (data.records || [])
+  const bases = (data.records || [])
     .map((record: any) => {
       const fields = record.fields || {};
       return {
@@ -118,23 +132,53 @@ async function loadConfiguredBases(): Promise<Base[]> {
       } as Base;
     })
     .filter(operational);
+
+  configuredBasesCache = {
+    bases,
+    expiresAt: Date.now() + CACHE_TTL_MS,
+  };
+
+  return bases;
 }
 
 async function loadSchema(baseId: string, airtableToken: string) {
-  const response = await fetch(
-    `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(baseId)}/tables`,
-    {
-      headers: { Authorization: `Bearer ${airtableToken}` },
-      cache: "no-store",
-    },
-  );
-
-  const data = await response.json();
-  if (!response.ok) {
-    throw new Error(data?.error?.message || "Schema load failed");
+  const cached = schemaCache.get(baseId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.tables;
   }
 
-  return (data.tables || []) as Table[];
+  const inFlight = schemaRequestCache.get(baseId);
+  if (inFlight) return inFlight;
+
+  const request = (async () => {
+    const response = await fetch(
+      `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(baseId)}/tables`,
+      {
+        headers: { Authorization: `Bearer ${airtableToken}` },
+        cache: "no-store",
+      },
+    );
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data?.error?.message || "Schema load failed");
+    }
+
+    const tables = (data.tables || []) as Table[];
+    schemaCache.set(baseId, {
+      tables,
+      expiresAt: Date.now() + CACHE_TTL_MS,
+    });
+    return tables;
+  })();
+
+  schemaRequestCache.set(baseId, request);
+
+  try {
+    return await request;
+  } finally {
+    schemaRequestCache.delete(baseId);
+  }
 }
 
 function findInvoiceTable(tables: Table[], base: Base) {
@@ -165,11 +209,12 @@ function findInvoiceTable(tables: Table[], base: Base) {
   return tables.find((table) => norm(table.name).includes("invoice"));
 }
 
-async function loadRecords(
+async function loadRecordsOnce(
   baseId: string,
   airtableToken: string,
   tableName: string,
   fields: string[],
+  filterByFormula = "",
 ) {
   const records: any[] = [];
   let offset = "";
@@ -181,6 +226,9 @@ async function loadRecords(
       params.append("fields[]", fieldName),
     );
 
+    if (filterByFormula) {
+      params.set("filterByFormula", filterByFormula);
+    }
     if (offset) params.set("offset", offset);
 
     const response = await fetch(
@@ -193,7 +241,11 @@ async function loadRecords(
 
     const data = await response.json();
     if (!response.ok) {
-      throw new Error(data?.error?.message || `Fetch failed: ${tableName}`);
+      const error = new Error(
+        data?.error?.message || `Fetch failed: ${tableName}`,
+      ) as Error & { status?: number };
+      error.status = response.status;
+      throw error;
     }
 
     records.push(...(data.records || []));
@@ -201,6 +253,73 @@ async function loadRecords(
   } while (offset);
 
   return records;
+}
+
+async function loadRecords(
+  baseId: string,
+  airtableToken: string,
+  tableName: string,
+  fields: string[],
+  filterByFormula = "",
+) {
+  try {
+    return await loadRecordsOnce(
+      baseId,
+      airtableToken,
+      tableName,
+      fields,
+      filterByFormula,
+    );
+  } catch (error) {
+    const status = (error as Error & { status?: number })?.status;
+
+    // Some legacy/mixed-type date fields may reject DATETIME_FORMAT.
+    // In that case preserve the old behavior instead of breaking the report.
+    if (filterByFormula && status === 422) {
+      return loadRecordsOnce(baseId, airtableToken, tableName, fields);
+    }
+
+    throw error;
+  }
+}
+
+function buildMonthPrefilter(
+  schemaFields: Field[],
+  dateFields: string[],
+  month: string,
+) {
+  const uniqueDateFields = [...new Set(dateFields.filter(Boolean))];
+  if (uniqueDateFields.length === 0) return "";
+
+  const fieldByName = new Map(
+    schemaFields.map((field) => [field.name, field]),
+  );
+  const safeDateTypes = new Set([
+    "date",
+    "datetime",
+    "createdtime",
+    "lastmodifiedtime",
+  ]);
+
+  // Only push the month filter into Airtable when every candidate field is a
+  // real date/time field. If a legacy base stores a date in text/formula form,
+  // keep the old full-read + local month check so no valid row can disappear.
+  const canPrefilterSafely = uniqueDateFields.every((fieldName) => {
+    const fieldType = String(fieldByName.get(fieldName)?.type || "")
+      .trim()
+      .toLowerCase();
+    return safeDateTypes.has(fieldType);
+  });
+
+  if (!canPrefilterSafely) return "";
+
+  const clauses = uniqueDateFields.map(
+    (fieldName) =>
+      `DATETIME_FORMAT({${fieldName}},'YYYY-MM')='${month}'`,
+  );
+
+  if (clauses.length === 1) return clauses[0];
+  return `OR(${clauses.join(",")})`;
 }
 
 function isInMonth(value: unknown, month: string) {
@@ -380,11 +499,17 @@ export async function GET(request: Request) {
           ...amountFields,
         ];
 
+        const monthPrefilter = buildMonthPrefilter(
+          schemaFields,
+          dateFields,
+          month,
+        );
         const records = await loadRecords(
           base.baseId,
           airtableToken,
           invoiceTable.name,
           requestedFields,
+          monthPrefilter,
         );
 
         for (const record of records) {

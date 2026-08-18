@@ -108,14 +108,6 @@ export default function OrderPendingReportPage() {
     void loadReport();
   }, []);
 
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      void loadReport(true);
-    }, 30000);
-
-    return () => window.clearInterval(timer);
-  }, [search, supplier, state, minAgeDays]);
-
   function exportExcel() {
     const exportRows = rows.map((row) => ({
       "Order No": row.orderNo,
@@ -266,7 +258,7 @@ export default function OrderPendingReportPage() {
         </div>
 
         <p className="mt-3 text-xs font-bold text-slate-400">
-          Auto refresh: every 30 seconds
+          Manual refresh • Background auto-refresh is off to reduce API usage
           {lastUpdated ? ` • Last updated: ${lastUpdated.toLocaleString("en-GB")}` : ""}
         </p>
       </div>
@@ -349,7 +341,7 @@ export default function OrderPendingReportPage() {
               {!loading && rows.length === 0 && (
                 <tr>
                   <td colSpan={13} className="px-4 py-12 text-center font-bold text-slate-500">
-                    No matching 5+ day Order Received records found.
+                    No matching {minAgeDays}+ day Order Received records found.
                   </td>
                 </tr>
               )}

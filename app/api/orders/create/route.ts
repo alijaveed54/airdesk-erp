@@ -31,6 +31,8 @@ type OrderEntryFieldMap = {
   packPrice?: string;
   receivedWh?: string;
   receivedInUae?: string;
+  instock?: string;
+  billNo?: string;
   supplier?: string;
 };
 
@@ -292,6 +294,18 @@ async function getOrderEntryFieldMap({
       "Received in UAE",
       "received_in_uae",
     ]),
+    instock: findSchemaField(fields, [
+      "instock",
+      "In Stock",
+      "Instock",
+      "InStock",
+    ]),
+    billNo: findSchemaField(fields, [
+      "bill_no",
+      "Bill No",
+      "Bill No.",
+      "Bill Number",
+    ]),
     supplier: findSchemaField(fields, [
       "Supplier",
       "supplier",
@@ -389,6 +403,10 @@ export async function POST(request: Request) {
       ? "DQ Order Entry"
       : airtable.tables.orderEntry || "BS Order Entry";
 
+    const isBsOrderEntry =
+      airtable.baseId === "app2hjpuQoeEL1Rn2" &&
+      orderEntryTable === "BS Order Entry";
+
     const schemaTables = await getBaseSchema(
       airtable.baseId,
       airtable.token
@@ -448,6 +466,35 @@ export async function POST(request: Request) {
       invoiceTableName: invoiceTable,
       customerTableName: customerTable,
     });
+
+    const orderEntryFieldMap = await getOrderEntryFieldMap({
+      baseId: airtable.baseId,
+      token: airtable.token,
+      tableName: orderEntryTable,
+      invoiceTableName: invoiceTable,
+    });
+
+    const hasBsInstockItems =
+      isBsOrderEntry && items.some((item: any) => Boolean(item?.warehouse));
+
+    if (hasBsInstockItems) {
+      const missingFields = [
+        !orderEntryFieldMap.receivedWh ? "received_in_wh_1" : "",
+        !orderEntryFieldMap.billNo ? "bill_no" : "",
+        !orderEntryFieldMap.instock ? "instock" : "",
+        !orderEntryFieldMap.receivedInUae ? "Received In UAE" : "",
+      ].filter(Boolean);
+
+      if (missingFields.length > 0) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: `BS In Stock item fields not found: ${missingFields.join(", ")}`,
+          },
+          { status: 400 }
+        );
+      }
+    }
 
     const invoiceFields: Record<string, any> = {
       [invoiceFieldMap.customerLink]: [customerId],
@@ -513,13 +560,6 @@ export async function POST(request: Request) {
 
     const invoiceId = invoiceData.id;
 
-    const orderEntryFieldMap = await getOrderEntryFieldMap({
-      baseId: airtable.baseId,
-      token: airtable.token,
-      tableName: orderEntryTable,
-      invoiceTableName: invoiceTable,
-    });
-
     const orderEntries = [];
 
     for (const item of items) {
@@ -551,6 +591,16 @@ export async function POST(request: Request) {
 
           if (orderEntryFieldMap.receivedInUae) {
             entryFields[orderEntryFieldMap.receivedInUae] = "Yes";
+          }
+
+          // Locked BS Order Entry In Stock rule:
+          // received_in_wh_1 = Yes
+          // bill_no = blank
+          // instock = Yes
+          // Received In UAE = Yes
+          if (isBsOrderEntry) {
+            entryFields[orderEntryFieldMap.instock!] = "Yes";
+            entryFields[orderEntryFieldMap.billNo!] = "";
           }
         } else if (orderEntryFieldMap.supplier) {
           entryFields[orderEntryFieldMap.supplier] =

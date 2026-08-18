@@ -7,6 +7,10 @@ import {
 import { getSession } from "@/lib/auth";
 import { createAuditLog } from "@/lib/audit";
 import {
+  resolveInvoiceIdsForOrderEntryRecords,
+  syncInvoiceInstockStatuses,
+} from "@/lib/order-instock-sync";
+import {
   loadSupplierWhatsAppContexts,
   sendSupplierWhatsAppNotification,
   supplierOwnedBy,
@@ -17,6 +21,8 @@ const ALLOWED_SUPPLIER_TABLES = new Set([
   "app2hjpuQoeEL1Rn2|BS Order Entry",
   "appiz6tozkQO2TQXt|FAB Order Entry",
 ]);
+
+type SupplierUpdateAction = "dispatch" | "stock_out" | "instock";
 
 type SoldOutFieldConfig = {
   fieldName: string;
@@ -30,11 +36,30 @@ const SOLD_OUT_FIELD_BY_TABLE = new Map<string, SoldOutFieldConfig>([
 
 function getSoldOutFieldUpdate(
   tableName: string,
-  action: "dispatch" | "stock_out",
+  action: SupplierUpdateAction,
 ): Record<string, string> {
   if (action !== "stock_out") return {};
   const config = SOLD_OUT_FIELD_BY_TABLE.get(tableName);
   return config ? { [config.fieldName]: config.value } : {};
+}
+
+function getInstockFieldUpdate(tableName: string): Record<string, string> {
+  const fields: Record<string, string> = {
+    bill_no: "",
+    received_in_wh_1: "Yes",
+  };
+
+  // BS Order Entry locked In Stock rule:
+  // received_in_wh_1 = Yes
+  // bill_no = blank
+  // instock = Yes
+  // Received In UAE = Yes
+  if (tableName === "BS Order Entry") {
+    fields.instock = "Yes";
+    fields["Received In UAE"] = "Yes";
+  }
+
+  return fields;
 }
 
 function getTodayBillNo() {
@@ -95,7 +120,7 @@ export async function PATCH(request: Request) {
         { status: 403 },
       );
     }
-    if (action !== "dispatch" && action !== "stock_out") {
+    if (action !== "dispatch" && action !== "stock_out" && action !== "instock") {
       return NextResponse.json(
         { success: false, message: "Invalid supplier update action" },
         { status: 400 },
@@ -111,6 +136,15 @@ export async function PATCH(request: Request) {
     }
 
     const currentRole = String(session.role || "").trim().toLowerCase();
+    if (action === "instock" && currentRole === "supplier") {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Supplier users cannot convert pending items to In Stock.",
+        },
+        { status: 403 },
+      );
+    }
     if (
       action === "dispatch" &&
       requestedManualBillNo &&
@@ -177,12 +211,29 @@ export async function PATCH(request: Request) {
     }
 
     const billNo =
-      action === "dispatch"
-        ? requestedManualBillNo || getTodayBillNo()
-        : "STOCK OUT";
+      action === "instock"
+        ? ""
+        : action === "dispatch"
+          ? requestedManualBillNo || getTodayBillNo()
+          : "STOCK OUT";
     const supplierActivity =
-      action === "stock_out" ? "Sold Out" : "Dispatched";
+      action === "stock_out"
+        ? "Sold Out"
+        : action === "dispatch"
+          ? "Dispatched"
+          : "";
     const activityDateTime = new Date().toISOString();
+
+    const updateFields: Record<string, string> =
+      action === "instock"
+        ? getInstockFieldUpdate(tableName)
+        : {
+            bill_no: billNo,
+            received_in_wh_1: "Yes",
+            "Supplier Activity": supplierActivity,
+            "Activity DateTime": activityDateTime,
+            ...getSoldOutFieldUpdate(tableName, action),
+          };
 
     const record = await airtableFetch({
       baseId,
@@ -191,68 +242,113 @@ export async function PATCH(request: Request) {
       recordId: lineId,
       method: "PATCH",
       fields: {
-        fields: {
-          bill_no: billNo,
-          received_in_wh_1: "Yes",
-          "Supplier Activity": supplierActivity,
-          "Activity DateTime": activityDateTime,
-          ...getSoldOutFieldUpdate(tableName, action),
-        },
+        fields: updateFields,
         typecast: true,
       },
     });
 
-    let whatsapp: SupplierWhatsAppResult;
-    if (!context) {
-      whatsapp = {
-        success: false,
-        action,
-        targetGroup: "",
-        message: contextError || "WhatsApp notification context was unavailable",
-      };
-    } else {
+    let instockSync: unknown = null;
+    if (action === "instock") {
+      const invoiceTableName =
+        tableName === "BS Order Entry" ? "BS Invoice" : "FAB Invoice";
+
       try {
-        whatsapp = await sendSupplierWhatsAppNotification(action, context);
-      } catch (error) {
+        const invoiceIds = await resolveInvoiceIdsForOrderEntryRecords({
+          baseId,
+          token: airtable.token,
+          orderEntryTableName: tableName,
+          invoiceTableName,
+          recordIds: [lineId],
+        });
+
+        instockSync = await syncInvoiceInstockStatuses({
+          baseId,
+          token: airtable.token,
+          orderEntryTableName: tableName,
+          invoiceTableName,
+          invoiceIds,
+        });
+      } catch (syncError) {
+        console.error(
+          "Invoice Instock sync after supplier pending conversion failed:",
+          syncError,
+        );
+        instockSync = {
+          success: false,
+          message:
+            syncError instanceof Error
+              ? syncError.message
+              : "Invoice Instock sync failed",
+        };
+      }
+    }
+
+    let whatsapp: SupplierWhatsAppResult | null = null;
+    if (action !== "instock") {
+      if (!context) {
         whatsapp = {
           success: false,
           action,
           targetGroup: "",
-          message:
-            error instanceof Error
-              ? error.message
-              : "WhatsApp notification failed",
+          message: contextError || "WhatsApp notification context was unavailable",
         };
+      } else {
+        try {
+          whatsapp = await sendSupplierWhatsAppNotification(action, context);
+        } catch (error) {
+          whatsapp = {
+            success: false,
+            action,
+            targetGroup: "",
+            message:
+              error instanceof Error
+                ? error.message
+                : "WhatsApp notification failed",
+          };
+        }
       }
     }
 
     await createAuditLog({
       module: "Supplier",
       action:
-        action === "dispatch" ? "Supplier Receive" : "Supplier Stock Out",
+        action === "instock"
+          ? "Supplier Convert In Stock"
+          : action === "dispatch"
+            ? "Supplier Receive"
+            : "Supplier Stock Out",
       recordId: lineId,
       recordLabel: context?.orderNo || lineId,
       newValue: JSON.stringify({
         baseId,
         tableName,
         bill_no: billNo,
-        supplier_activity: supplierActivity,
-        activity_date_time: activityDateTime,
+        supplier_activity: action === "instock" ? undefined : supplierActivity,
+        activity_date_time: action === "instock" ? undefined : activityDateTime,
         bill_number_source:
-          action === "dispatch" && requestedManualBillNo
-            ? "manual"
-            : "automatic",
+          action === "instock"
+            ? "cleared-for-instock"
+            : action === "dispatch" && requestedManualBillNo
+              ? "manual"
+              : "automatic",
         received_in_wh_1: "Yes",
+        instock:
+          action === "instock" && tableName === "BS Order Entry" ? "Yes" : undefined,
+        received_in_uae:
+          action === "instock" && tableName === "BS Order Entry" ? "Yes" : undefined,
         sold_out_field:
           action === "stock_out"
             ? getSoldOutFieldUpdate(tableName, action)
             : undefined,
-        whatsapp: {
-          success: whatsapp.success,
-          targetGroup: whatsapp.targetGroup,
-          idMessage: whatsapp.idMessage || "",
-          message: whatsapp.message || "",
-        },
+        instock_sync: action === "instock" ? instockSync : undefined,
+        whatsapp: whatsapp
+          ? {
+              success: whatsapp.success,
+              targetGroup: whatsapp.targetGroup,
+              idMessage: whatsapp.idMessage || "",
+              message: whatsapp.message || "",
+            }
+          : undefined,
       }),
     });
 
@@ -260,8 +356,14 @@ export async function PATCH(request: Request) {
       success: true,
       record,
       billNo,
+      instockSync,
       whatsapp,
-      warning: whatsapp.success ? "" : whatsapp.message || "WhatsApp send failed",
+      warning:
+        action === "instock"
+          ? ""
+          : whatsapp?.success
+            ? ""
+            : whatsapp?.message || "WhatsApp send failed",
     });
   } catch (error) {
     return handleApiError(error, "Supplier line update failed");

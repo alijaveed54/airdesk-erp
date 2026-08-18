@@ -316,30 +316,65 @@ function getFieldConfig(fields: SchemaField[]): FieldConfig {
   };
 }
 
+const SCHEMA_CACHE_TTL_MS = 5 * 60 * 1000;
+const schemaCache = new Map<
+  string,
+  { tables: SchemaTable[]; expiresAt: number }
+>();
+const schemaRequestCache = new Map<string, Promise<SchemaTable[]>>();
+
 async function getSchema(baseId: string, token: string) {
-  const response = await fetch(
-    `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(
-      baseId
-    )}/tables`,
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-      cache: "no-store",
-    }
-  );
+  const now = Date.now();
+  const cached = schemaCache.get(baseId);
 
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(
-      data?.error?.message ||
-        data?.error?.error?.message ||
-        "Unable to load Airtable schema"
-    );
+  if (cached && cached.expiresAt > now) {
+    return cached.tables;
   }
 
-  return (data.tables || []) as SchemaTable[];
+  const inFlight = schemaRequestCache.get(baseId);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const request = (async () => {
+    const response = await fetch(
+      `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(
+        baseId
+      )}/tables`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        cache: "no-store",
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data?.error?.message ||
+          data?.error?.error?.message ||
+          "Unable to load Airtable schema"
+      );
+    }
+
+    const tables = (data.tables || []) as SchemaTable[];
+    schemaCache.set(baseId, {
+      tables,
+      expiresAt: Date.now() + SCHEMA_CACHE_TTL_MS,
+    });
+
+    return tables;
+  })();
+
+  schemaRequestCache.set(baseId, request);
+
+  try {
+    return await request;
+  } finally {
+    schemaRequestCache.delete(baseId);
+  }
 }
 
 function escapeFormulaValue(value: string) {
@@ -465,7 +500,7 @@ async function resolveLinkedValues({
   return values;
 }
 
-async function resolveLinkedProductImages({
+async function resolveLinkedProductData({
   baseId,
   token,
   schema,
@@ -478,6 +513,7 @@ async function resolveLinkedProductImages({
   skuField?: SchemaField;
   records: any[];
 }) {
+  const values = new Map<string, string>();
   const images = new Map<string, AirtableAttachment>();
 
   if (
@@ -485,14 +521,21 @@ async function resolveLinkedProductImages({
     skuField.type !== "multipleRecordLinks" ||
     !skuField.options?.linkedTableId
   ) {
-    return images;
+    return { values, images };
   }
 
   const productTable = schema.find(
     (table) => table.id === skuField.options?.linkedTableId
   );
 
-  if (!productTable) return images;
+  if (!productTable) return { values, images };
+
+  const primaryField =
+    productTable.fields.find(
+      (item) => item.id === productTable.primaryFieldId
+    ) || productTable.fields[0];
+
+  if (!primaryField) return { values, images };
 
   const imageField = findField(productTable.fields || [], [
     "Image",
@@ -500,8 +543,6 @@ async function resolveLinkedProductImages({
     "Product Image",
     "Item Image",
   ]);
-
-  if (!imageField) return images;
 
   const productIds = Array.from(
     new Set(
@@ -534,7 +575,11 @@ async function resolveLinkedProductImages({
       pageSize: "100",
       filterByFormula: formula,
     });
-    params.append("fields[]", imageField.name);
+    params.append("fields[]", primaryField.name);
+
+    if (imageField && imageField.name !== primaryField.name) {
+      params.append("fields[]", imageField.name);
+    }
 
     const response = await fetch(
       airtableUrl(baseId, productTable.name, params),
@@ -549,22 +594,29 @@ async function resolveLinkedProductImages({
     if (!response.ok) {
       throw new Error(
         data?.error?.message ||
-          `Unable to load product images from ${productTable.name}`
+          `Unable to resolve product data from ${productTable.name}`
       );
     }
 
     for (const record of data.records || []) {
-      const attachment = getFirstAttachment(
-        record.fields?.[imageField.name]
+      values.set(
+        record.id,
+        text(record.fields?.[primaryField.name])
       );
 
-      if (attachment) {
-        images.set(record.id, attachment);
+      if (imageField) {
+        const attachment = getFirstAttachment(
+          record.fields?.[imageField.name]
+        );
+
+        if (attachment) {
+          images.set(record.id, attachment);
+        }
       }
     }
   }
 
-  return images;
+  return { values, images };
 }
 
 function firstLinkedRecordId(value: unknown) {
@@ -852,29 +904,25 @@ export async function GET(request: Request) {
 
     const records = data.records || [];
 
-    const orderValues = await resolveLinkedValues({
-      baseId: airtable.baseId,
-      token: airtable.token,
-      schema,
-      field: config.orderNo,
-      records,
-    });
+    const [orderValues, productData] = await Promise.all([
+      resolveLinkedValues({
+        baseId: airtable.baseId,
+        token: airtable.token,
+        schema,
+        field: config.orderNo,
+        records,
+      }),
+      resolveLinkedProductData({
+        baseId: airtable.baseId,
+        token: airtable.token,
+        schema,
+        skuField: config.sku,
+        records,
+      }),
+    ]);
 
-    const skuValues = await resolveLinkedValues({
-      baseId: airtable.baseId,
-      token: airtable.token,
-      schema,
-      field: config.sku,
-      records,
-    });
-
-    const productImages = await resolveLinkedProductImages({
-      baseId: airtable.baseId,
-      token: airtable.token,
-      schema,
-      skuField: config.sku,
-      records,
-    });
+    const skuValues = productData.values;
+    const productImages = productData.images;
 
     const items = records.map((record: any) => {
       const fields = record.fields || {};

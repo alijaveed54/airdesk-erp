@@ -349,7 +349,7 @@ function normalizeRecord(
       ? textValue(fields[map.receivedUaeDateTime])
       : "",
     bill_no: textValue(fields[map.billNo]) || "",
-    image: fields[map.image] || [],
+    image: [],
   };
 
   return {
@@ -625,6 +625,12 @@ async function loadI5qDqGroupedOrders({
       "Sales person Name",
       "Sales Person Name",
     ]);
+    const dispatchDateField = getFieldName(invoiceFields, [
+      "Dispatch Date",
+      "Dispatched Date",
+      "Despatch Date",
+      "Date Dispatched",
+    ]);
 
     const grouped = new Map<string, any>();
 
@@ -742,7 +748,7 @@ async function loadI5qDqGroupedOrders({
       group.items.push({
         id: record.id,
         fields: {
-          image: record.fields?.[imageField] || [],
+          image: [],
           "Item Code": itemCode,
           Size: textValue(record.fields?.[sizeField]),
           quantity,
@@ -765,10 +771,13 @@ async function loadI5qDqGroupedOrders({
       String(b.date).localeCompare(String(a.date))
   );
 
-  return latest && !hasFilters
+  const finalOrders = latest && !hasFilters
     ? allGroups.slice(0, 100)
     : allGroups;
+
+  return finalOrders;
 }
+
 
 export async function GET(req: NextRequest) {
   try {
@@ -893,6 +902,59 @@ export async function GET(req: NextRequest) {
       const params = new URLSearchParams({
         pageSize: "100",
       });
+
+      // Server-side filtering to reduce CPU and Airtable payload.
+      const formulaParts: string[] = [];
+
+      if (orderNo && fieldMap.orderNo) {
+        formulaParts.push(
+          `SEARCH("${orderNo.replace(/"/g, "\\\"")}", {${fieldMap.orderNo}})`
+        );
+      }
+
+      if (sku && fieldMap.itemCode) {
+        formulaParts.push(
+          `SEARCH("${sku.replace(/"/g, "\\\"")}", {${fieldMap.itemCode}})`
+        );
+      }
+
+      if (customerNumber && fieldMap.customerNumber) {
+        formulaParts.push(
+          `SEARCH("${customerNumber.replace(/"/g, "\\\"")}", {${fieldMap.customerNumber}})`
+        );
+      }
+
+      if (formulaParts.length) {
+        params.set(
+          "filterByFormula",
+          formulaParts.length === 1
+            ? formulaParts[0]
+            : `AND(${formulaParts.join(",")})`
+        );
+      }
+
+      // Keep Airtable payload smaller. Images are already lazy loaded.
+      const requiredFields = [
+        fieldMap.orderLink,
+        fieldMap.orderNo,
+        fieldMap.itemCode,
+        fieldMap.sku,
+        fieldMap.quantity,
+        fieldMap.customer,
+        fieldMap.customerNumber,
+        fieldMap.createdDate,
+        fieldMap.date,
+        fieldMap.store,
+        fieldMap.orderStatus,
+        fieldMap.supplier,
+        fieldMap.receivedWh,
+        fieldMap.receivedUae,
+        fieldMap.billNo,
+      ].filter(Boolean);
+
+      requiredFields.forEach((field) =>
+        params.append("fields[]", field)
+      );
 
       if (offset) params.set("offset", offset);
 
@@ -1029,6 +1091,8 @@ export async function GET(req: NextRequest) {
           ? Number(numericMatch.join(""))
           : 0;
 
+        const linkedOrderId = fields[fieldMap.orderLink]?.[0] || "";
+
         grouped[groupedOrderNo] = {
           orderNo: groupedOrderNo,
           orderNumber:
@@ -1051,6 +1115,11 @@ export async function GET(req: NextRequest) {
         };
       }
 
+      const itemPrice = numberValue(fields["Price"] || fields["Selling Price"] || fields["Sale Price"] || 0);
+      record.fields = {
+        ...record.fields,
+        "item value": itemPrice * numberValue(fields.quantity),
+      };
       grouped[groupedOrderNo].items.push(record);
 
       const qty = numberValue(fields.quantity);

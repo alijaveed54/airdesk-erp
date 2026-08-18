@@ -1693,11 +1693,12 @@ export default function FacebookBatchPage() {
   async function batchAction(
     batchId: string,
     action:
-      | "pause"
-      | "resume"
-      | "process_now"
-      | "retry_failed"
-      | "cancel"
+  | "pause"
+  | "resume"
+  | "process_now"
+  | "retry_failed"
+  | "reset_stuck"
+  | "cancel"
   ) {
     try {
       setBusyBatchId(
@@ -2848,6 +2849,7 @@ export default function FacebookBatchPage() {
                                     "retry_failed"
                                   );
                                 }
+                                
                               }}
                               disabled={busy}
                               title="Retry only failed Facebook jobs"
@@ -2858,7 +2860,20 @@ export default function FacebookBatchPage() {
                               Retry Failed ({batch.failedJobs})
                             </button>
                           )}
-
+<button
+  type="button"
+  onClick={() =>
+    batchAction(
+      batch.id,
+      "reset_stuck"
+    )
+  }
+  disabled={busyBatchId === batch.id}
+  className="mysmar-icon-action rounded-lg border border-orange-200 bg-white text-orange-600 hover:bg-orange-50"
+  title="Reset stuck jobs"
+>
+  <RotateCcw size={15} />
+</button>
                           {!["completed", "cancelled"].includes(batch.status) && (
                             <button
                               type="button"

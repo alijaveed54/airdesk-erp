@@ -115,14 +115,36 @@ async function getSchema(baseId: string, token: string) {
   return tables;
 }
 
-function isUaeBase(baseName: string) {
+function supportsCourierDownloadBase(baseName: string) {
   const normalized = baseName.trim().toLowerCase();
 
   return (
     normalized.includes("bs order") ||
     normalized.includes("bs invoice") ||
     normalized.includes("uae") ||
-    normalized === "bs"
+    normalized === "bs" ||
+    normalized.includes("tatlumput") ||
+    normalized.includes("siyam") ||
+    normalized === "tat" ||
+    normalized === "ts" ||
+    normalized.startsWith("ts ")
+  );
+}
+
+function booleanFlag(value: unknown) {
+  const resolved = first(value);
+
+  if (typeof resolved === "boolean") return resolved;
+
+  const normalized = String(resolved ?? "")
+    .trim()
+    .toLowerCase();
+
+  return (
+    normalized === "true" ||
+    normalized === "yes" ||
+    normalized === "checked" ||
+    normalized === "1"
   );
 }
 
@@ -487,12 +509,12 @@ export async function GET(request: Request) {
       );
     }
 
-    if (!isUaeBase(airtable.baseName)) {
+    if (!supportsCourierDownloadBase(airtable.baseName)) {
       return NextResponse.json(
         {
           success: false,
           message:
-            "Courier Download is available only for UAE orders",
+            "Courier Download is available only for BS / TS TFM-supported orders",
         },
         { status: 400 }
       );
@@ -537,7 +559,7 @@ export async function GET(request: Request) {
 
     if (!invoiceTable) {
       throw new Error(
-        "UAE invoice table was not found"
+        "Courier invoice table was not found"
       );
     }
 
@@ -721,6 +743,13 @@ export async function GET(request: Request) {
       "Special Instructions",
     ]);
 
+    const invoiceReplacementField = findField(fields, [
+      "Replacement",
+      "replacement",
+      "Replacement Order",
+      "Is Replacement",
+    ]);
+
     const customerTable = customerLinkField?.options
       ?.linkedTableId
       ? schema.find(
@@ -878,6 +907,10 @@ export async function GET(request: Request) {
           0
         );
 
+        const isRts = invoiceReplacementField
+          ? booleanFlag(invoiceValues[invoiceReplacementField])
+          : false;
+
         const sender =
           text(invoiceValues[invoiceStoreField]) ||
           "Mysmar";
@@ -896,7 +929,11 @@ export async function GET(request: Request) {
           street,
           destinationCode: destinationCode(city),
           sender,
-          service: cod > 0 ? "COD" : "PrePaid",
+          service: isRts
+            ? "ReturnService-RTS"
+            : cod > 0
+              ? "COD"
+              : "PrePaid",
           cod,
           note: text(invoiceValues[invoiceNoteField]),
           requireHandling: "No",

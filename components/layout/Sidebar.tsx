@@ -201,6 +201,14 @@ export default function Sidebar() {
     },
     {
       show:
+        session?.role !== "Supplier" &&
+        (isAdmin || Boolean(permission?.canView)),
+      href: "/orders/uae-dispatch",
+      label: "UAE Dispatch",
+      icon: Truck,
+    },
+    {
+      show:
         isAdmin ||
         session?.role === "Manager" ||
         Boolean(
@@ -328,6 +336,13 @@ export default function Sidebar() {
       label: "Users",
       icon: Users,
     },
+     {
+      show: isAdmin,
+      href: "/admin/api-usage",
+      label: "API Usage",
+      icon: BarChart3,
+    },
+
     {
       show: isAdmin,
       href: "/admin/schema",
@@ -419,6 +434,7 @@ export default function Sidebar() {
       "/orders/list",
       "/orders/grouped",
       "/orders/quick-edit",
+      "/orders/uae-dispatch",
       "/reports/ready-to-process",
       "/exceptions",
     ],
@@ -660,6 +676,34 @@ export default function Sidebar() {
                       <span className="h-2 w-2 rounded-full bg-current" />
                       Inventory List FAB
                     </Link>
+
+                    <div className="my-2 border-t border-slate-200" />
+
+                    <Link
+                      href="/stock/doha"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className={childLinkClass(
+                        pathname === "/stock/doha",
+                        "blue",
+                      )}
+                    >
+                      <span className="h-2 w-2 rounded-full bg-current" />
+                      FAB Doha Public Stock ↗
+                    </Link>
+
+                    <Link
+                      href="/stock/uae"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className={childLinkClass(
+                        pathname === "/stock/uae",
+                        "blue",
+                      )}
+                    >
+                      <span className="h-2 w-2 rounded-full bg-current" />
+                      UAE Public Stock ↗
+                    </Link>
                   </div>
                 )}
               </div>
@@ -719,6 +763,16 @@ export default function Sidebar() {
               >
                 <MessageCircle size={18} />
                 WhatsApp Supplier Import
+              </Link>
+            )}
+
+            {isAdmin && (
+              <Link
+                href="/timelines"
+                className={navLinkClass("/timelines")}
+              >
+                <MessageCircle size={18} />
+                Timelines
               </Link>
             )}
 
@@ -844,4 +898,3 @@ export default function Sidebar() {
     </>
   );
 }
-

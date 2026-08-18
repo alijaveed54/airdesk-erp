@@ -2,8 +2,13 @@ import {
   NextRequest,
   NextResponse,
 } from "next/server";
+
 import { getSession } from "@/lib/auth";
-import { shuffleFacebookImagesForPage } from "@/lib/facebook-image-shuffle";
+
+import {
+  shuffleFacebookImagesForPage,
+} from "@/lib/facebook-image-shuffle";
+
 import {
   FacebookBatchJob,
   FacebookBatchManifest,
@@ -17,25 +22,75 @@ import {
   saveBatchJob,
 } from "@/lib/facebook-batch";
 
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (
+    item: T,
+    index: number
+  ) => Promise<R>
+) {
+  if (!items.length) {
+    return [] as R[];
+  }
+
+  const results =
+    new Array<R>(items.length);
+
+  let cursor = 0;
+
+  async function runWorker() {
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+
+      if (index >= items.length) {
+        return;
+      }
+
+      results[index] =
+        await worker(
+          items[index],
+          index
+        );
+    }
+  }
+
+  await Promise.all(
+    Array.from(
+      {
+        length: Math.min(
+          limit,
+          items.length
+        ),
+      },
+      () => runWorker()
+    )
+  );
+
+  return results;
+}
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
+
 
 const MAX_GROUPS = 30;
 const MAX_POSTS = 100;
 const MAX_PAGES_PER_GROUP = 20;
 const MAX_TOTAL_JOBS = 500;
+
+
 const MAX_IMAGES_PER_POST = Math.min(
   Math.max(
     Number(
-      process.env
-        .FACEBOOK_BATCH_MAX_IMAGES ||
-        40
+      process.env.FACEBOOK_BATCH_MAX_IMAGES || 40
     ) || 40,
     1
   ),
   80
 );
+
 
 type SessionLike = {
   role?: string;
@@ -44,6 +99,7 @@ type SessionLike = {
   username?: string;
   email?: string;
 };
+
 
 type CreatePostInput = {
   id?: unknown;
@@ -56,6 +112,7 @@ type CreatePostInput = {
   videoPosition?: unknown;
 };
 
+
 type CreateGroupInput = {
   id?: unknown;
   pageRecordIds?: unknown;
@@ -64,6 +121,7 @@ type CreateGroupInput = {
   startAt?: unknown;
   posts?: unknown;
 };
+
 
 function jsonError(
   message: string,
@@ -80,6 +138,7 @@ function jsonError(
   );
 }
 
+
 function cleanString(
   value: unknown,
   maxLength = 10000
@@ -91,37 +150,6 @@ function cleanString(
     .slice(0, maxLength);
 }
 
-function cleanPageMessages(
-  value: unknown
-) {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    Array.isArray(value)
-  ) {
-    return {} as Record<string, string>;
-  }
-
-  const output: Record<string, string> = {};
-
-  Object.entries(
-    value as Record<string, unknown>
-  )
-    .slice(0, MAX_PAGES_PER_GROUP)
-    .forEach(([recordId, message]) => {
-      const cleanRecordId =
-        cleanString(recordId, 1000);
-
-      if (!cleanRecordId) {
-        return;
-      }
-
-      output[cleanRecordId] =
-        cleanString(message, 50000);
-    });
-
-  return output;
-}
 
 function uniqueStrings(
   value: unknown,
@@ -135,15 +163,13 @@ function uniqueStrings(
     new Set(
       value
         .map((item) =>
-          cleanString(
-            item,
-            1000
-          )
+          cleanString(item,1000)
         )
         .filter(Boolean)
     )
-  ).slice(0, limit);
+  ).slice(0,limit);
 }
+
 
 function cleanUrls(
   value: unknown
@@ -156,6 +182,7 @@ function cleanUrls(
   );
 }
 
+
 function cleanFileNames(
   value: unknown
 ) {
@@ -165,95 +192,31 @@ function cleanFileNames(
   );
 }
 
-function cleanVideoUrl(value: unknown) {
-  const url = cleanString(value, 2000);
 
-  return /^https:\/\//i.test(url)
-    ? url
-    : "";
-}
-
-function cleanVideoPosition(value: unknown) {
-  return cleanString(value, 20).toLowerCase() ===
-    "first"
-    ? "first" as const
-    : "last" as const;
-}
-
-function parseStartAt(
-  value: unknown
+function publicBatch(
+  batch: FacebookBatchManifest
 ) {
-  const clean =
-    cleanString(value, 100);
-
-  if (!clean) {
-    return new Date();
-  }
-
-  const date =
-    new Date(clean);
-
-  if (
-    Number.isNaN(
-      date.getTime()
-    )
-  ) {
-    throw new Error(
-      "Group start date/time invalid hai."
-    );
-  }
-
-  const minimum =
-    Date.now() -
-    60 * 1000;
-
-  if (
-    date.getTime() <
-    minimum
-  ) {
-    return new Date();
-  }
-
-  const maximum =
-    Date.now() +
-    180 *
-      24 *
-      60 *
-      60 *
-      1000;
-
-  if (
-    date.getTime() >
-    maximum
-  ) {
-    throw new Error(
-      "Group start time maximum 6 months future tak ho sakti hai."
-    );
-  }
-
-  return date;
+  return {
+    ...batch,
+    progressPercent:
+      batch.totalJobs > 0
+        ? Math.round(
+            (
+              (
+                batch.completedJobs +
+                batch.failedJobs +
+                batch.cancelledJobs
+              )
+              /
+              batch.totalJobs
+            )
+            *
+            100
+          )
+        : 0,
+  };
 }
 
-function parseIntervalMinutes(
-  value: unknown
-) {
-  const number =
-    Number(value);
-
-  if (
-    !Number.isFinite(number)
-  ) {
-    return 10;
-  }
-
-  return Math.min(
-    Math.max(
-      Math.floor(number),
-      0
-    ),
-    1440
-  );
-}
 
 function isAllowedRole(
   session: SessionLike
@@ -269,140 +232,46 @@ function isAllowedRole(
     role === "manager" ||
     role === "employee" ||
     role === "staff" ||
-    Boolean(
-      session.superAdmin
-    )
+    Boolean(session.superAdmin)
   );
 }
 
+
 async function requireFacebookUser() {
+
   const session =
     await getSession() as
-      | SessionLike
-      | null;
+      SessionLike | null;
+
 
   if (!session) {
     throw {
-      status: 401,
-      message:
-        "Not authenticated",
+      status:401,
+      message:"Not authenticated",
     };
   }
 
-  if (
-    !isAllowedRole(session)
-  ) {
+
+  if (!isAllowedRole(session)) {
     throw {
-      status: 403,
-      message:
-        "Facebook Batch Posts sirf Admin, Manager aur Employee use kar sakte hain.",
+      status:403,
+      message:"Facebook Batch access denied",
     };
   }
+
 
   return session;
 }
 
-function getSessionName(
-  session: SessionLike
-) {
-  return (
-    cleanString(
-      session.fullName,
-      200
-    ) ||
-    cleanString(
-      session.username,
-      200
-    ) ||
-    cleanString(
-      session.email,
-      200
-    ) ||
-    "Mysmar User"
-  );
-}
-
-async function mapWithConcurrency<
-  T,
-  R
->(
-  items: T[],
-  limit: number,
-  worker: (
-    item: T,
-    index: number
-  ) => Promise<R>
-) {
-  if (!items.length) {
-    return [] as R[];
-  }
-
-  const output =
-    new Array<R>(items.length);
-  let cursor = 0;
-
-  async function runWorker() {
-    while (true) {
-      const index = cursor;
-      cursor += 1;
-
-      if (
-        index >=
-        items.length
-      ) {
-        return;
-      }
-
-      output[index] =
-        await worker(
-          items[index],
-          index
-        );
-    }
-  }
-
-  await Promise.all(
-    Array.from(
-      {
-        length: Math.min(
-          Math.max(1, limit),
-          items.length
-        ),
-      },
-      () => runWorker()
-    )
-  );
-
-  return output;
-}
-
-function publicBatch(
-  batch: FacebookBatchManifest
-) {
-  return {
-    ...batch,
-    progressPercent:
-      batch.totalJobs > 0
-        ? Math.round(
-            (
-              (
-                batch.completedJobs +
-                batch.failedJobs +
-                batch.cancelledJobs
-              ) /
-              batch.totalJobs
-            ) *
-              100
-          )
-        : 0,
-  };
-}
 
 export async function GET(
   request: NextRequest
 ) {
+
   try {
+
     await requireFacebookUser();
+
 
     const batchId =
       cleanString(
@@ -412,94 +281,118 @@ export async function GET(
         100
       );
 
+
     if (batchId) {
+
       const refreshed =
         await refreshBatchSummary(
           batchId
         );
 
+
       return NextResponse.json({
-        success: true,
+        success:true,
         batch:
           publicBatch(
             refreshed.batch
           ),
         jobs:
           refreshed.jobs,
-        workerConfigured:
-          Boolean(
-            process.env
-              .FACEBOOK_BATCH_WORKER_SECRET
-          ),
       });
     }
+
+
+    const days =
+      Number(
+        request.nextUrl
+          .searchParams
+          .get("days")
+      ) || 2;
+
 
     const batches =
       await listBatches();
 
+
+    const cutoff =
+      Date.now()
+      -
+      Math.min(days,365)
+      *
+      24 *
+      60 *
+      60 *
+      1000;
+
+
     return NextResponse.json({
-      success: true,
+
+      success:true,
+
       batches:
-        batches.map(
-          publicBatch
-        ),
+        batches
+          .filter((batch)=>{
+
+            return (
+              new Date(
+                batch.createdAt
+              ).getTime()
+              >= cutoff
+            );
+
+          })
+          .map(publicBatch),
+
       workerConfigured:
         Boolean(
           process.env
-            .FACEBOOK_BATCH_WORKER_SECRET
+          .FACEBOOK_BATCH_WORKER_SECRET
         ),
-    });
-  } catch (error) {
-    const status =
-      Number(
-        (
-          error as {
-            status?: number;
-          }
-        )?.status || 500
-      );
 
-    const message =
-      error instanceof Error
-        ? error.message
-        : cleanString(
-            (
-              error as {
-                message?: string;
-              }
-            )?.message,
-            1000
-          ) ||
-          "Facebook batches load nahi ho sake.";
+    });
+
+
+  } catch(error) {
 
     return jsonError(
-      message,
-      status
+      error instanceof Error
+        ? error.message
+        : "Facebook batch load failed"
     );
-  }
-}
 
+  }
+
+}
 export async function POST(
   request: NextRequest
 ) {
+
   let batchId = "";
 
   try {
+
     const session =
       await requireFacebookUser();
 
+
     const body =
       await request.json();
+
 
     batchId =
       cleanString(
         body.batchId,
         100
-      ) ||
+      )
+      ||
       crypto.randomUUID();
 
+
     const existing =
-      await getBatch(batchId);
+      await getBatch(
+        batchId
+      );
+
 
     if (existing) {
       return jsonError(
@@ -508,532 +401,367 @@ export async function POST(
       );
     }
 
+
     const batchName =
       cleanString(
         body.batchName,
         200
-      ) ||
-      `Facebook Batch ${new Date().toLocaleString(
-        "en-PK"
-      )}`;
-
-    const rawGroups =
-      Array.isArray(
-        body.groups
       )
-        ? (
-            body.groups as
-              CreateGroupInput[]
-          ).slice(
+      ||
+      `Facebook Batch ${new Date().toLocaleString("en-PK")}`;
+
+
+    const groups =
+      Array.isArray(body.groups)
+        ? body.groups.slice(
             0,
             MAX_GROUPS
           )
         : [];
 
+
     if (
-      rawGroups.length === 0
+      groups.length === 0
     ) {
       return jsonError(
         "Kam az kam ek post group required hai."
       );
     }
 
-    const normalizedGroups:
-      Array<{
-        id: string;
-        pageRecordIds: string[];
-        intervalMinutes: number;
-        autoShuffleImages: boolean;
-        startAt: Date;
-        posts: Array<{
-          id: string;
-          message: string;
-          pageMessages: Record<string, string>;
-          imageUrls: string[];
-          imageNames: string[];
-          videoUrl: string;
-          videoName: string;
-          videoPosition: "first" | "last";
-        }>;
-      }> = [];
-
-    let totalPostCount = 0;
-    let totalImages = 0;
-    let totalVideos = 0;
-
-    for (
-      let groupIndex = 0;
-      groupIndex <
-      rawGroups.length;
-      groupIndex += 1
-    ) {
-      const rawGroup =
-        rawGroups[groupIndex];
-
-      const pageRecordIds =
-        uniqueStrings(
-          rawGroup.pageRecordIds,
-          MAX_PAGES_PER_GROUP
-        );
-
-      if (
-        pageRecordIds.length === 0
-      ) {
-        throw new Error(
-          `Group ${groupIndex + 1}: kam az kam ek Facebook Page select karein.`
-        );
-      }
-
-      const rawPosts =
-        Array.isArray(
-          rawGroup.posts
-        )
-          ? (
-              rawGroup.posts as
-                CreatePostInput[]
-            )
-          : [];
-
-      if (
-        rawPosts.length === 0
-      ) {
-        throw new Error(
-          `Group ${groupIndex + 1}: kam az kam ek post required hai.`
-        );
-      }
-
-      const posts =
-        rawPosts.map(
-          (
-            rawPost,
-            postIndex
-          ) => {
-            const message =
-              cleanString(
-                rawPost.message,
-                50000
-              );
-
-            const pageMessages =
-              cleanPageMessages(
-                rawPost.pageMessages
-              );
-
-            const imageUrls =
-              cleanUrls(
-                rawPost.imageUrls
-              );
-
-            const imageNames =
-              cleanFileNames(
-                rawPost.imageNames
-              );
-
-            const videoUrl =
-              cleanVideoUrl(
-                rawPost.videoUrl
-              );
-
-            const videoName =
-              cleanString(
-                rawPost.videoName,
-                500
-              );
-
-            const videoPosition =
-              cleanVideoPosition(
-                rawPost.videoPosition
-              );
-
-            if (
-              imageUrls.length >
-              MAX_IMAGES_PER_POST
-            ) {
-              throw new Error(
-                `Post ${postIndex + 1}: maximum ${MAX_IMAGES_PER_POST} images allowed hain.`
-              );
-            }
-
-            totalImages +=
-              imageUrls.length;
-
-            if (videoUrl) {
-              totalVideos += 1;
-            }
-
-            return {
-              id:
-                cleanString(
-                  rawPost.id,
-                  100
-                ) ||
-                crypto.randomUUID(),
-              message,
-              pageMessages,
-              imageUrls,
-              imageNames,
-              videoUrl,
-              videoName,
-              videoPosition,
-            };
-          }
-        );
-
-      totalPostCount +=
-        posts.length;
-
-      if (
-        totalPostCount >
-        MAX_POSTS
-      ) {
-        throw new Error(
-          `Ek batch mein maximum ${MAX_POSTS} source posts allowed hain.`
-        );
-      }
-
-      normalizedGroups.push({
-        id:
-          cleanString(
-            rawGroup.id,
-            100
-          ) ||
-          crypto.randomUUID(),
-        pageRecordIds,
-        intervalMinutes:
-          parseIntervalMinutes(
-            rawGroup.intervalMinutes
-          ),
-        autoShuffleImages:
-          rawGroup.autoShuffleImages !== false,
-        startAt:
-          parseStartAt(
-            rawGroup.startAt
-          ),
-        posts,
-      });
-    }
-
-    const pageIds =
-      Array.from(
-        new Set(
-          normalizedGroups.flatMap(
-            (group) =>
-              group.pageRecordIds
-          )
-        )
-      );
-
-    const pages =
-      await mapWithConcurrency(
-        pageIds,
-        5,
-        async (
-          recordId
-        ) =>
-          loadFacebookPage(
-            recordId
-          )
-      );
-
-    const pageMap =
-      new Map<
-        string,
-        FacebookPageConfig
-      >(
-        pages.map((page) => [
-          page.recordId,
-          page,
-        ])
-      );
-
-    for (const page of pages) {
-      if (
-        !page.active
-      ) {
-        throw new Error(
-          `${page.pageName || page.pageId} inactive hai.`
-        );
-      }
-
-      if (
-        !page.pageId ||
-        !page.pageToken
-      ) {
-        throw new Error(
-          `${page.pageName || "Facebook Page"} ka Page ID ya token missing hai.`
-        );
-      }
-    }
-
-    const totalJobs =
-      normalizedGroups.reduce(
-        (
-          sum,
-          group
-        ) =>
-          sum +
-          group.posts.length *
-            group.pageRecordIds
-              .length,
-        0
-      );
-
-    if (
-      totalJobs >
-      MAX_TOTAL_JOBS
-    ) {
-      throw new Error(
-        `Ek batch mein maximum ${MAX_TOTAL_JOBS} Page-post jobs allowed hain.`
-      );
-    }
 
     const now =
       new Date()
         .toISOString();
 
+
     const manifest:
-      FacebookBatchManifest = {
-        id: batchId,
-        name: batchName,
-        status: "creating",
-        createdAt: now,
-        createdBy:
-          getSessionName(
-            session
-          ),
-        updatedAt: now,
-        groupCount:
-          normalizedGroups.length,
-        postCount:
-          totalPostCount,
-        totalJobs,
-        queuedJobs:
-          totalJobs,
-        processingJobs: 0,
-        completedJobs: 0,
-        failedJobs: 0,
-        cancelledJobs: 0,
-        totalImages,
-        totalVideos,
-      };
+      FacebookBatchManifest =
+    {
+      id: batchId,
+      name: batchName,
+      status: "creating",
+      createdAt: now,
+      createdBy:
+        cleanString(
+          session.fullName ||
+          session.username ||
+          session.email ||
+          "User",
+          200
+        ),
+
+      updatedAt: now,
+
+      groupCount:
+        groups.length,
+
+      postCount:0,
+
+      totalJobs:0,
+
+      queuedJobs:0,
+
+      processingJobs:0,
+
+      completedJobs:0,
+
+      failedJobs:0,
+
+      cancelledJobs:0,
+
+      totalImages:0,
+
+      totalVideos:0,
+    };
+
 
     await saveBatch(
       manifest
     );
 
+
     const jobs:
       FacebookBatchJob[] = [];
 
-    normalizedGroups.forEach(
-      (
-        group,
-        groupIndex
-      ) => {
-        group.posts.forEach(
-          (
-            post,
-            postIndex
-          ) => {
-            const notBefore =
-              new Date(
-                group.startAt
-                  .getTime() +
-                  postIndex *
-                    group.intervalMinutes *
-                    60 *
-                    1000
-              ).toISOString();
 
-            group.pageRecordIds.forEach(
-              (pageRecordId, pageIndex) => {
-                const page =
-                  pageMap.get(
-                    pageRecordId
-                  );
+    let postCount = 0;
+    let totalImages = 0;
+    let totalVideos = 0;
 
-                if (!page) {
-                  throw new Error(
-                    "Selected Facebook Page resolve nahi hui."
-                  );
-                }
 
-                const hasPageOverride =
-                  Object.prototype.hasOwnProperty.call(
-                    post.pageMessages,
-                    pageRecordId
-                  );
+    for (
+      let groupIndex = 0;
+      groupIndex < groups.length;
+      groupIndex++
+    ) {
 
-                const resolvedMessage =
-                  hasPageOverride
-                    ? post.pageMessages[pageRecordId]
-                    : page.defaultCaption || post.message;
+      const group =
+        groups[groupIndex];
 
-                if (
-                  !resolvedMessage &&
-                  post.imageUrls.length === 0 &&
-                  !post.videoUrl
-                ) {
-                  throw new Error(
-                    `Group ${groupIndex + 1}, Post ${postIndex + 1}, ${page.pageName || page.pageId}: caption, image ya video required hai.`
-                  );
-                }
 
-                const orderedImages =
-                  shuffleFacebookImagesForPage(
-                    post.imageUrls.map(
-                      (url, imageIndex) => ({
-                        url,
-                        name:
-                          post.imageNames[imageIndex] || "",
-                      })
-                    ),
-                    {
-                      enabled:
-                        group.autoShuffleImages,
-                      seed:
-                        `${batchId}:${group.id}:${post.id}`,
-                      pageIndex,
-                    }
-                  );
-
-                jobs.push({
-                  id:
-                    crypto.randomUUID(),
-                  batchId,
-                  groupId:
-                    group.id,
-                  postId:
-                    post.id,
-                  groupNumber:
-                    groupIndex + 1,
-                  postNumber:
-                    postIndex + 1,
-                  pageRecordId:
-                    page.recordId,
-                  pageName:
-                    page.pageName,
-                  pageId:
-                    page.pageId,
-                  message:
-                    resolvedMessage,
-                  imageUrls:
-                    orderedImages.map(
-                      (image) => image.url
-                    ),
-                  imageNames:
-                    orderedImages.map(
-                      (image) => image.name
-                    ),
-                  videoUrl:
-                    post.videoUrl || undefined,
-                  videoName:
-                    post.videoName || undefined,
-                  videoPosition:
-                    post.videoPosition,
-                  status:
-                    "queued",
-                  priority: 0,
-                  notBefore,
-                  attempts: 0,
-                  maxAttempts: 3,
-                  createdAt: now,
-                  updatedAt: now,
-                });
-              }
-            );
-          }
+      const pageRecordIds =
+        uniqueStrings(
+          group.pageRecordIds,
+          MAX_PAGES_PER_GROUP
         );
+
+
+      const posts =
+        Array.isArray(group.posts)
+          ? group.posts.slice(
+              0,
+              MAX_POSTS
+            )
+          : [];
+
+
+      for (
+        let postIndex = 0;
+        postIndex < posts.length;
+        postIndex++
+      ) {
+
+        const post =
+          posts[postIndex];
+
+
+        const imageUrls =
+          cleanUrls(
+            post.imageUrls
+          );
+
+
+        const imageNames =
+          cleanFileNames(
+            post.imageNames
+          );
+
+
+        const videoUrl =
+          cleanString(
+            post.videoUrl,
+            2000
+          );
+
+
+        totalImages +=
+          imageUrls.length;
+
+
+        if(videoUrl){
+          totalVideos++;
+        }
+
+
+        postCount++;
+
+
+        for(
+          const pageRecordId
+          of pageRecordIds
+        ){
+
+          const page =
+            await loadFacebookPage(
+              pageRecordId
+            );
+
+
+          if(!page){
+            continue;
+          }
+
+
+          jobs.push({
+
+            id:
+              crypto.randomUUID(),
+
+            batchId,
+
+            groupId:
+              group.id ||
+              crypto.randomUUID(),
+
+            postId:
+              post.id ||
+              crypto.randomUUID(),
+
+            groupNumber:
+              groupIndex + 1,
+
+            postNumber:
+              postIndex + 1,
+
+            pageRecordId,
+
+            pageName:
+              page.pageName,
+
+            pageId:
+              page.pageId,
+
+            message:
+              cleanString(
+                post.message,
+                50000
+              ),
+
+
+            imageUrls,
+
+            imageNames,
+
+
+            videoUrl:
+              videoUrl ||
+              undefined,
+
+
+            status:
+              "queued",
+
+
+            priority:0,
+
+            notBefore:
+              now,
+
+
+            attempts:0,
+
+            maxAttempts:3,
+
+
+            createdAt:now,
+
+            updatedAt:now,
+
+          });
+
+        }
+
       }
-    );
+
+    }
+
 
     await mapWithConcurrency(
       jobs,
       8,
-      async (job) =>
+      async(job)=>
         saveBatchJob(job)
     );
 
-    const queued:
-      FacebookBatchManifest = {
-        ...manifest,
-        status: "queued",
-        updatedAt:
-          new Date()
-            .toISOString(),
-      };
+
+    const queuedBatch:
+      FacebookBatchManifest =
+    {
+
+      ...manifest,
+
+      status:
+        "queued",
+
+      postCount,
+
+      totalJobs:
+        jobs.length,
+
+      queuedJobs:
+        jobs.length,
+
+      totalImages,
+
+      totalVideos,
+
+      updatedAt:now,
+
+    };
+
 
     await saveBatch(
-      queued
+      queuedBatch
     );
 
+
     return NextResponse.json({
-      success: true,
+
+      success:true,
+
       message:
-        `${totalPostCount} source post(s), ${totalJobs} Facebook job(s) queue ho gaye. Browser ab close kiya ja sakta hai jab worker running ho.`,
+        `${postCount} posts aur ${jobs.length} jobs queue ho gayin.`,
+
       batch:
-        publicBatch(queued),
+        publicBatch(
+          queuedBatch
+        ),
+
     });
-  } catch (error) {
-    const status =
-      Number(
-        (
-          error as {
-            status?: number;
-          }
-        )?.status || 500
-      );
 
-    const message =
-      error instanceof Error
-        ? error.message
-        : cleanString(
-            (
-              error as {
-                message?: string;
-              }
-            )?.message,
-            1000
-          ) ||
-          "Facebook batch create nahi ho saka.";
 
-    if (batchId) {
-      try {
+  } catch(error){
+
+
+    if(batchId){
+
+      try{
+
         const batch =
           await getBatch(
             batchId
           );
 
-        if (batch) {
+
+        if(batch){
+
           await saveBatch({
+
             ...batch,
-            status: "failed",
+
+            status:"failed",
+
             lastError:
-              message,
+              error instanceof Error
+                ? error.message
+                : "Batch create failed",
+
             updatedAt:
               new Date()
-                .toISOString(),
+              .toISOString(),
+
           });
+
         }
-      } catch {
-        // Preserve the original error.
-      }
+
+      }catch{}
+
     }
 
-    return jsonError(
-      message,
-      status
-    );
-  }
-}
 
+    return jsonError(
+
+      error instanceof Error
+        ? error.message
+        : "Facebook batch create nahi ho saka."
+
+    );
+
+  }
+
+}
 export async function PATCH(
   request: NextRequest
 ) {
+
   try {
+
     await requireFacebookUser();
+
 
     const body =
       await request.json();
+
 
     const batchId =
       cleanString(
@@ -1041,11 +769,13 @@ export async function PATCH(
         100
       );
 
+
     const action =
       cleanString(
         body.action,
         50
       ).toLowerCase();
+
 
     if (!batchId) {
       return jsonError(
@@ -1053,8 +783,12 @@ export async function PATCH(
       );
     }
 
+
     const batch =
-      await getBatch(batchId);
+      await getBatch(
+        batchId
+      );
+
 
     if (!batch) {
       return jsonError(
@@ -1063,895 +797,458 @@ export async function PATCH(
       );
     }
 
+
     const now =
       new Date()
-        .toISOString();
+      .toISOString();
+
 
     let actionMessage =
-      "Batch status update ho gaya.";
+      "Batch update ho gaya.";
+
 
     if (
       action === "pause"
     ) {
+
       await saveBatch({
+
         ...batch,
-        status: "paused",
-        updatedAt: now,
+
+        status:
+          "paused",
+
+        updatedAt:
+          now,
+
       });
-    } else if (
+
+
+      actionMessage =
+        "Batch pause ho gaya.";
+
+    }
+
+
+    else if (
       action === "resume"
     ) {
+
+
       await saveBatch({
+
         ...batch,
-        status: "queued",
+
+        status:
+          "queued",
+
         completedAt:
           undefined,
-        updatedAt: now,
+
+        updatedAt:
+          now,
+
       });
-    } else if (
-      action ===
-      "process_now"
+
+
+      actionMessage =
+        "Batch resume ho gaya.";
+
+    }
+
+
+    else if (
+      action === "process_now"
     ) {
+
+
       const jobs =
         await getBatchJobs(
           batchId
         );
+
 
       const runnableJobs =
         jobs.filter(
-          (job) =>
-            job.status ===
-              "queued" ||
-            job.status ===
-              "retrying"
+          (job)=>
+            job.status === "queued" ||
+            job.status === "retrying"
         );
 
-      if (
+
+      if(
         runnableJobs.length === 0
-      ) {
+      ){
+
         return jsonError(
-          "Is batch mein koi queued ya retrying job nahi hai.",
+          "Is batch mein koi queued job nahi hai.",
           409
         );
+
       }
 
-      const processTime =
-        Date.now();
 
       await mapWithConcurrency(
+
         runnableJobs,
+
         8,
-        async (job, index) =>
+
+        async(job,index)=>
+
           saveBatchJob({
+
             ...job,
-            status: "queued",
+
+            status:
+              "queued",
+
+            priority:
+              1000,
+
             notBefore:
               new Date(
-                processTime +
-                index
+                Date.now()+index
               ).toISOString(),
+
             startedAt:
               undefined,
+
             completedAt:
               undefined,
-            lastError: "",
-            updatedAt: now,
+
+            updatedAt:
+              now,
+
           })
+
       );
 
-      await saveBatch({
-        ...batch,
-        status: "queued",
-        completedAt:
-          undefined,
-        lastError: "",
-        updatedAt: now,
-      });
-
-      actionMessage =
-        `${runnableJobs.length} remaining job(s) ab process ke liye ready hain. Worker on ho to posting foran start ho jayegi.`;
-    } else if (
-      action ===
-      "reschedule"
-    ) {
-      const jobs =
-        await getBatchJobs(
-          batchId
-        );
-
-      const scheduledJobs =
-        jobs.filter(
-          (job) =>
-            job.status ===
-              "queued" ||
-            job.status ===
-              "retrying"
-        );
-
-      if (
-        scheduledJobs.length === 0
-      ) {
-        return jsonError(
-          "Is batch mein koi queued ya retrying scheduled job nahi hai.",
-          409
-        );
-      }
-
-      const targetStart =
-        parseStartAt(
-          body.startAt
-        );
-
-      const validScheduleTimes =
-        scheduledJobs
-          .map((job) =>
-            new Date(
-              job.notBefore
-            ).getTime()
-          )
-          .filter((time) =>
-            Number.isFinite(
-              time
-            )
-          );
-
-      const currentFirstTime =
-        validScheduleTimes.length > 0
-          ? Math.min(
-              ...validScheduleTimes
-            )
-          : Date.now();
-
-      const shiftMilliseconds =
-        targetStart.getTime() -
-        currentFirstTime;
-
-      await mapWithConcurrency(
-        scheduledJobs,
-        8,
-        async (job, index) => {
-          const existingTime =
-            new Date(
-              job.notBefore
-            ).getTime();
-
-          const nextTime =
-            Number.isFinite(
-              existingTime
-            )
-              ? existingTime +
-                shiftMilliseconds
-              : targetStart.getTime() +
-                index;
-
-          return saveBatchJob({
-            ...job,
-            status: "queued",
-            notBefore:
-              new Date(
-                nextTime
-              ).toISOString(),
-            startedAt:
-              undefined,
-            completedAt:
-              undefined,
-            lastError: "",
-            updatedAt: now,
-          });
-        }
-      );
-
-      const hasProcessingJob =
-        jobs.some(
-          (job) =>
-            job.status ===
-            "processing"
-        );
 
       await saveBatch({
+
         ...batch,
+
         status:
-          batch.status ===
-          "paused"
-            ? "paused"
-            : hasProcessingJob
-              ? "processing"
-              : "queued",
+          "queued",
+
         completedAt:
           undefined,
-        lastError: "",
-        updatedAt: now,
+
+        updatedAt:
+          now,
+
       });
 
-      actionMessage =
-        `${scheduledJobs.length} remaining scheduled job(s) ka date/time update ho gaya. Existing timeline gaps preserve kiye gaye hain.`;
-    } else if (
-      action ===
-      "post_cancel"
-    ) {
-      const postId =
-        cleanString(
-          body.postId,
-          100
-        );
 
-      if (!postId) {
-        return jsonError(
-          "Post ID required hai."
-        );
-      }
+      actionMessage =
+        `${runnableJobs.length} jobs processing ke liye ready hain.`;
+
+    }
+
+
+    else if (
+      action === "cancel"
+    ) {
+
 
       const jobs =
         await getBatchJobs(
           batchId
         );
 
-      const targetJobs =
+
+      const pendingJobs =
         jobs.filter(
-          (job) =>
-            job.postId ===
-              postId &&
-            (
-              job.status ===
-                "queued" ||
-              job.status ===
-                "retrying" ||
-              job.status ===
-                "failed"
-            )
+          (job)=>
+            job.status === "queued" ||
+            job.status === "retrying"
         );
 
-      if (
-        targetJobs.length === 0
-      ) {
-        return jsonError(
-          "Is post ki koi cancellable pending job nahi mili.",
-          409
-        );
-      }
 
       await mapWithConcurrency(
-        targetJobs,
+
+        pendingJobs,
+
         8,
-        async (job) =>
+
+        async(job)=>
+
           saveBatchJob({
+
             ...job,
+
             status:
               "cancelled",
-            completedAt: now,
-            updatedAt: now,
-          })
-      );
 
-      actionMessage =
-        `${targetJobs.length} Page job(s) cancel ho gayin. Completed ya processing job touch nahi hui.`;
-    } else if (
-      action ===
-      "post_restore"
-    ) {
-      const postId =
-        cleanString(
-          body.postId,
-          100
-        );
-
-      if (!postId) {
-        return jsonError(
-          "Post ID required hai."
-        );
-      }
-
-      const jobs =
-        await getBatchJobs(
-          batchId
-        );
-
-      const targetJobs =
-        jobs.filter(
-          (job) =>
-            job.postId ===
-              postId &&
-            (
-              job.status ===
-                "cancelled" ||
-              job.status ===
-                "failed"
-            )
-        );
-
-      if (
-        targetJobs.length === 0
-      ) {
-        return jsonError(
-          "Is post ki koi cancelled ya failed job restore nahi ho sakti.",
-          409
-        );
-      }
-
-      const restoreTime =
-        cleanString(
-          body.notBefore,
-          100
-        );
-
-      const restoredNotBefore =
-        restoreTime
-          ? parseStartAt(
-              restoreTime
-            ).toISOString()
-          : now;
-
-      await mapWithConcurrency(
-        targetJobs,
-        8,
-        async (job) =>
-          saveBatchJob({
-            ...job,
-            status: "queued",
-            attempts: 0,
-            notBefore:
-              restoredNotBefore,
-            startedAt:
-              undefined,
             completedAt:
-              undefined,
-            lastError: "",
-            updatedAt: now,
+              now,
+
+            updatedAt:
+              now,
+
           })
+
       );
+
 
       await saveBatch({
+
         ...batch,
+
         status:
-          batch.status ===
-          "paused"
-            ? "paused"
-            : "queued",
+          "cancelled",
+
         completedAt:
-          undefined,
-        lastError: "",
-        updatedAt: now,
+          now,
+
+        updatedAt:
+          now,
+
       });
 
-      actionMessage =
-        `${targetJobs.length} Page job(s) restore ho kar queue mein aa gayin.`;
-    } else if (
-      action ===
-      "post_retry"
-    ) {
-      const postId =
-        cleanString(
-          body.postId,
-          100
-        );
 
-      if (!postId) {
-        return jsonError(
-          "Post ID required hai."
-        );
-      }
+      actionMessage =
+        `${pendingJobs.length} jobs cancel ho gayi.`;
+
+    }
+    
+    else if (
+      action === "reset_stuck"
+    ) {
 
       const jobs =
         await getBatchJobs(
           batchId
         );
 
-      const targetJobs =
+
+      const stuckJobs =
         jobs.filter(
-          (job) =>
-            job.postId ===
-              postId &&
-            job.status ===
-              "failed"
-        );
+          (job)=>{
 
-      if (
-        targetJobs.length === 0
-      ) {
-        return jsonError(
-          "Is post ki koi failed job retry ke liye nahi mili.",
-          409
-        );
-      }
+            if(
+              job.status !== "processing"
+            ){
+              return false;
+            }
 
-      await mapWithConcurrency(
-        targetJobs,
-        8,
-        async (job) =>
-          saveBatchJob({
-            ...job,
-            status: "queued",
-            attempts: 0,
-            notBefore: now,
-            startedAt:
-              undefined,
-            completedAt:
-              undefined,
-            lastError: "",
-            updatedAt: now,
-          })
-      );
 
-      await saveBatch({
-        ...batch,
-        status:
-          batch.status ===
-          "paused"
-            ? "paused"
-            : "queued",
-        completedAt:
-          undefined,
-        lastError: "",
-        updatedAt: now,
-      });
+            if(
+              !job.startedAt
+            ){
+              return true;
+            }
 
-      actionMessage =
-        `${targetJobs.length} failed Page job(s) retry queue mein aa gayin.`;
-    } else if (
-      action ===
-      "post_edit"
-    ) {
-      const postId =
-        cleanString(
-          body.postId,
-          100
-        );
 
-      if (!postId) {
-        return jsonError(
-          "Post ID required hai."
-        );
-      }
-
-      const jobs =
-        await getBatchJobs(
-          batchId
-        );
-
-      const targetJobs =
-        jobs.filter(
-          (job) =>
-            job.postId ===
-              postId &&
-            job.status !==
-              "completed" &&
-            job.status !==
-              "processing"
-        );
-
-      if (
-        targetJobs.length === 0
-      ) {
-        return jsonError(
-          "Completed ya processing post edit nahi ho sakti.",
-          409
-        );
-      }
-
-      const hasMessage =
-        Object.prototype
-          .hasOwnProperty.call(
-            body,
-            "message"
-          );
-
-      const nextMessage =
-        hasMessage
-          ? cleanString(
-              body.message,
-              63206
-            )
-          : undefined;
-
-      const startAtValue =
-        cleanString(
-          body.notBefore,
-          100
-        );
-
-      const nextNotBefore =
-        startAtValue
-          ? parseStartAt(
-              startAtValue
-            ).toISOString()
-          : undefined;
-
-      await mapWithConcurrency(
-        targetJobs,
-        8,
-        async (job) =>
-          saveBatchJob({
-            ...job,
-            message:
-              nextMessage ===
-              undefined
-                ? job.message
-                : nextMessage,
-            notBefore:
-              nextNotBefore ||
-              job.notBefore,
-            updatedAt: now,
-          })
-      );
-
-      actionMessage =
-        `${targetJobs.length} editable Page job(s) update ho gayin.`;
-    } else if (
-      action ===
-      "post_make_next"
-    ) {
-      const postId =
-        cleanString(
-          body.postId,
-          100
-        );
-
-      if (!postId) {
-        return jsonError(
-          "Post ID required hai."
-        );
-      }
-
-      const jobs =
-        await getBatchJobs(
-          batchId
-        );
-
-      const targetJobs =
-        jobs.filter(
-          (job) =>
-            job.postId ===
-              postId &&
-            (
-              job.status ===
-                "queued" ||
-              job.status ===
-                "retrying"
-            )
-        );
-
-      if (
-        targetJobs.length === 0
-      ) {
-        return jsonError(
-          "Is post ki koi queued ya retrying job nahi mili.",
-          409
-        );
-      }
-
-      const maximumPriority =
-        jobs.reduce(
-          (maximum, job) =>
-            Math.max(
-              maximum,
-              Number(
-                job.priority || 0
-              )
-            ),
-          0
-        );
-
-      const nextPriority =
-        maximumPriority + 1000;
-
-      await mapWithConcurrency(
-        targetJobs,
-        8,
-        async (job, index) =>
-          saveBatchJob({
-            ...job,
-            status: "queued",
-            priority:
-              nextPriority,
-            notBefore:
+            return (
+              Date.now()
+              -
               new Date(
-                Date.now() + index
-              ).toISOString(),
-            startedAt:
-              undefined,
-            completedAt:
-              undefined,
-            lastError: "",
-            updatedAt: now,
-          })
-      );
+                job.startedAt
+              ).getTime()
+              >
+              30 *
+              60 *
+              1000
+            );
 
-      await saveBatch({
-        ...batch,
-        status:
-          batch.status ===
-          "paused"
-            ? "paused"
-            : "queued",
-        completedAt:
-          undefined,
-        updatedAt: now,
-      });
-
-      actionMessage =
-        `Selected post highest priority par hai aur ab due hai. Worker is batch ki next available job ke tor par isay uthayega.`;
-    } else if (
-      action ===
-        "post_move_up" ||
-      action ===
-        "post_move_down"
-    ) {
-      const postId =
-        cleanString(
-          body.postId,
-          100
+          }
         );
 
-      if (!postId) {
+
+      if(
+        stuckJobs.length === 0
+      ){
+
         return jsonError(
-          "Post ID required hai."
-        );
-      }
-
-      const jobs =
-        await getBatchJobs(
-          batchId
-        );
-
-      const runnableJobs =
-        jobs.filter(
-          (job) =>
-            job.status ===
-              "queued" ||
-            job.status ===
-              "retrying"
-        );
-
-      const grouped =
-        new Map<
-          string,
-          FacebookBatchJob[]
-        >();
-
-      for (
-        const job of runnableJobs
-      ) {
-        const existing =
-          grouped.get(
-            job.postId
-          ) || [];
-
-        existing.push(job);
-        grouped.set(
-          job.postId,
-          existing
-        );
-      }
-
-      const orderedPosts =
-        Array.from(
-          grouped.entries()
-        )
-          .map(
-            ([id, postJobs]) => ({
-              id,
-              jobs: postJobs,
-              priority:
-                Math.max(
-                  ...postJobs.map(
-                    (job) =>
-                      Number(
-                        job.priority || 0
-                      )
-                  )
-                ),
-              notBefore:
-                Math.min(
-                  ...postJobs.map(
-                    (job) =>
-                      new Date(
-                        job.notBefore
-                      ).getTime()
-                  )
-                ),
-              groupNumber:
-                postJobs[0]
-                  ?.groupNumber || 0,
-              postNumber:
-                postJobs[0]
-                  ?.postNumber || 0,
-            })
-          )
-          .sort(
-            (first, second) =>
-              second.priority -
-                first.priority ||
-              first.notBefore -
-                second.notBefore ||
-              first.groupNumber -
-                second.groupNumber ||
-              first.postNumber -
-                second.postNumber
-          );
-
-      const currentIndex =
-        orderedPosts.findIndex(
-          (post) =>
-            post.id === postId
-        );
-
-      if (currentIndex < 0) {
-        return jsonError(
-          "Selected post pending priority list mein nahi mili.",
+          "Koi stuck processing job nahi mili.",
           409
         );
+
       }
 
-      const targetIndex =
-        action ===
-        "post_move_up"
-          ? currentIndex - 1
-          : currentIndex + 1;
-
-      if (
-        targetIndex < 0 ||
-        targetIndex >=
-          orderedPosts.length
-      ) {
-        return jsonError(
-          "Post already priority list ke end par hai.",
-          409
-        );
-      }
-
-      [
-        orderedPosts[currentIndex],
-        orderedPosts[targetIndex],
-      ] = [
-        orderedPosts[targetIndex],
-        orderedPosts[currentIndex],
-      ];
 
       await mapWithConcurrency(
-        orderedPosts,
-        4,
-        async (
-          post,
-          postIndex
-        ) => {
-          const priority =
-            orderedPosts.length -
-            postIndex;
 
-          await mapWithConcurrency(
-            post.jobs,
-            8,
-            async (job) =>
-              saveBatchJob({
-                ...job,
-                priority,
-                updatedAt: now,
-              })
-          );
-        }
+        stuckJobs,
+
+        8,
+
+        async(job)=>
+
+          saveBatchJob({
+
+            ...job,
+
+            status:
+              "queued",
+
+            notBefore:
+              now,
+
+            startedAt:
+              undefined,
+
+            completedAt:
+              undefined,
+
+            lastError:
+              "Manually reset after stuck processing timeout.",
+
+            updatedAt:
+              now,
+
+          })
+
       );
 
+
+      await saveBatch({
+
+        ...batch,
+
+        status:
+          "queued",
+
+        completedAt:
+          undefined,
+
+        updatedAt:
+          now,
+
+      });
+
+
       actionMessage =
-        action ===
-        "post_move_up"
-          ? "Post priority list mein upar move ho gayi."
-          : "Post priority list mein neeche move ho gayi.";
-    } else if (
-      action ===
-      "retry_failed"
+        `${stuckJobs.length} stuck job(s) queue mein wapas aa gayi.`;
+
+    }
+
+
+    else if (
+      action === "retry_failed"
     ) {
+
+
       const jobs =
         await getBatchJobs(
           batchId
         );
+
 
       const failedJobs =
         jobs.filter(
-          (job) =>
-            job.status ===
-            "failed"
+          (job)=>
+            job.status === "failed"
         );
 
-      if (
+
+      if(
         failedJobs.length === 0
-      ) {
+      ){
+
         return jsonError(
-          "Is batch mein retry ke liye koi failed Facebook job nahi mili.",
+          "Koi failed job nahi mili.",
           409
         );
+
       }
 
+
       await mapWithConcurrency(
+
         failedJobs,
+
         8,
-        async (job) =>
+
+        async(job)=>
+
           saveBatchJob({
+
             ...job,
-            status: "queued",
-            attempts: 0,
-            notBefore: now,
+
+            status:
+              "queued",
+
+            attempts:
+              0,
+
+            notBefore:
+              now,
+
             startedAt:
               undefined,
+
             completedAt:
               undefined,
-            lastError: "",
-            updatedAt: now,
+
+            lastError:
+              "",
+
+            updatedAt:
+              now,
+
           })
+
       );
 
+
       await saveBatch({
+
         ...batch,
+
         status:
-          batch.status ===
-          "paused"
-            ? "paused"
-            : "queued",
+          "queued",
+
         completedAt:
           undefined,
-        lastError: "",
-        updatedAt: now,
+
+        updatedAt:
+          now,
+
       });
+
 
       actionMessage =
-        `${failedJobs.length} failed Facebook Page job(s) retry queue mein aa gayin. Completed jobs touch nahi hui.`;
-    } else if (
-      action === "cancel"
-    ) {
-      const jobs =
-        await getBatchJobs(
-          batchId
-        );
+        `${failedJobs.length} failed jobs retry queue mein aa gayi.`;
 
-      const cancellable =
-        jobs.filter(
-          (job) =>
-            job.status ===
-              "queued" ||
-            job.status ===
-              "retrying"
-        );
-
-      await mapWithConcurrency(
-        cancellable,
-        8,
-        async (job) =>
-          saveBatchJob({
-            ...job,
-            status:
-              "cancelled",
-            completedAt: now,
-            updatedAt: now,
-          })
-      );
-
-      await saveBatch({
-        ...batch,
-        status:
-          "cancelled",
-        completedAt: now,
-        updatedAt: now,
-      });
-    } else {
-      return jsonError(
-        "Action invalid hai. Supported batch ya post action use karein."
-      );
     }
+
+
+    else {
+
+      return jsonError(
+        "Invalid action."
+      );
+
+    }
+
 
     const refreshed =
       await refreshBatchSummary(
         batchId
       );
 
+
     return NextResponse.json({
-      success: true,
+
+      success:true,
+
       message:
         actionMessage,
+
       batch:
         publicBatch(
           refreshed.batch
         ),
+
     });
-  } catch (error) {
+
+
+  } catch(error) {
+
+
     const status =
       Number(
         (
@@ -1961,23 +1258,18 @@ export async function PATCH(
         )?.status || 500
       );
 
+
     const message =
       error instanceof Error
         ? error.message
-        : cleanString(
-            (
-              error as {
-                message?: string;
-              }
-            )?.message,
-            1000
-          ) ||
-          "Facebook batch action failed.";
+        : "Facebook batch action failed.";
+
 
     return jsonError(
       message,
       status
     );
-  }
-}
 
+  }
+
+}

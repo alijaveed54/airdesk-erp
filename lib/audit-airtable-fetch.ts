@@ -12,6 +12,9 @@ import type {
   AuditOperation,
   JsonValue,
 } from "@/lib/audit-types";
+import {
+  recordExternalApiUsageForCurrentUser,
+} from "@/lib/api-usage";
 
 type AirtableRecord = {
   id: string;
@@ -52,7 +55,7 @@ type AuditGlobal = typeof globalThis & {
   [key: symbol]: unknown;
 };
 
-function nativeFetch(
+async function nativeFetch(
   input: RequestInfo | URL,
   init?: RequestInit
 ) {
@@ -63,16 +66,33 @@ function nativeFetch(
       ORIGINAL_FETCH_KEY
     ];
 
-  if (typeof original === "function") {
-    return (
-      original as typeof fetch
-    )(input, init);
-  }
+  const fetchFunction =
+    typeof original === "function"
+      ? (original as typeof fetch)
+      : globalThis.fetch.bind(globalThis);
 
-  return globalThis.fetch(
-    input,
-    init
-  );
+  // Count the real outbound HTTP attempt, not the browser -> Next.js route hit.
+  // The tracker write runs in parallel so it adds as little latency as possible.
+  const usagePromise =
+    recordExternalApiUsageForCurrentUser(
+      input,
+      init
+    ).catch((error) => {
+      console.error(
+        "Outbound API usage tracking failed:",
+        error
+      );
+    });
+
+  const responsePromise =
+    fetchFunction(input, init);
+
+  const [response] = await Promise.all([
+    responsePromise,
+    usagePromise,
+  ]);
+
+  return response;
 }
 
 export function installGlobalAirtableAudit() {

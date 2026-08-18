@@ -743,6 +743,41 @@ export function supplierOwnedBy(
   return context.supplier.trim().toLowerCase() === supplierCode.trim().toLowerCase();
 }
 
+export async function sendSupplierPendingWhatsAppImage(
+  context: SupplierWhatsAppContext,
+): Promise<SupplierWhatsAppResult> {
+  const action: SupplierAction = "dispatch";
+  const targetGroup = getGreenApiGroup("dispatch");
+
+  if (!context.imageUrl) {
+    return {
+      success: false,
+      action,
+      targetGroup,
+      message: `Image missing for ${context.sku || context.recordId}; pending item was not sent`,
+    };
+  }
+
+  const caption = `${context.orderNo || "-"} - ${context.sku || "-"} - ${context.qty || 0}`;
+  const result = await sendGreenApiFileByUrl({
+    chatId: targetGroup,
+    urlFile: context.imageUrl,
+    fileName: safeFileName(
+      context.imageFileName,
+      context.sku,
+      context.imageUrl,
+    ),
+    caption,
+  });
+
+  return {
+    success: true,
+    action,
+    targetGroup,
+    idMessage: String(result.idMessage || ""),
+  };
+}
+
 export async function sendSupplierWhatsAppNotification(
   action: SupplierAction,
   context: SupplierWhatsAppContext,

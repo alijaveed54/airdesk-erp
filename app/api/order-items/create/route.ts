@@ -59,6 +59,21 @@ function pickWritableField(
   return undefined;
 }
 
+function valueForYesField(field: Field): unknown {
+  if (field.type === "checkbox") return true;
+  if (field.type === "number" || field.type === "currency" || field.type === "percent") return 1;
+  if (field.type === "multipleSelects") return ["Yes"];
+  return "Yes";
+}
+
+function valueForBlankField(field: Field): unknown {
+  if (field.type === "checkbox") return false;
+  if (field.type === "multipleSelects" || field.type === "multipleRecordLinks") return [];
+  if (field.type === "singleSelect") return null;
+  if (field.type === "number" || field.type === "currency" || field.type === "percent") return null;
+  return "";
+}
+
 function escapeFormulaValue(value: string) {
   return String(value || "")
     .replace(/\\/g, "\\\\")
@@ -306,6 +321,16 @@ export async function POST(req: NextRequest) {
       ]
     );
 
+    const instockField = pickWritableField(
+      orderEntryTable.fields,
+      ["instock", "In Stock", "Instock", "InStock"]
+    );
+
+    const billNoField = pickWritableField(
+      orderEntryTable.fields,
+      ["bill_no", "Bill No", "Bill No.", "Bill Number"]
+    );
+
     const sizeField = pickWritableField(
       orderEntryTable.fields,
       ["Size", "size"]
@@ -320,6 +345,32 @@ export async function POST(req: NextRequest) {
       orderEntryTable.fields,
       ["Pack Price", "pack price", "pack_price"]
     );
+
+    const isBsOrderEntry =
+      airtable.baseId === "app2hjpuQoeEL1Rn2" &&
+      orderEntryTableName === "BS Order Entry";
+
+    const hasBsInstockItems =
+      isBsOrderEntry && items.some((item: any) => Boolean(item?.warehouse));
+
+    if (hasBsInstockItems) {
+      const missingFields = [
+        !warehouseField ? "received_in_wh_1" : "",
+        !billNoField ? "bill_no" : "",
+        !instockField ? "instock" : "",
+        !receivedInUaeField ? "Received In UAE" : "",
+      ].filter(Boolean);
+
+      if (missingFields.length > 0) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: `BS In Stock item fields missing or read-only: ${missingFields.join(", ")}`,
+          },
+          { status: 400 }
+        );
+      }
+    }
 
     if (!invoiceLink || !skuLink || !quantityField) {
       return NextResponse.json(
@@ -397,11 +448,21 @@ export async function POST(req: NextRequest) {
 
       if (item.warehouse) {
         if (warehouseField) {
-          fields[warehouseField.name] = "Yes";
+          fields[warehouseField.name] = valueForYesField(warehouseField);
         }
 
         if (receivedInUaeField) {
-          fields[receivedInUaeField.name] = "Yes";
+          fields[receivedInUaeField.name] = valueForYesField(receivedInUaeField);
+        }
+
+        // Locked BS Order Entry In Stock rule:
+        // received_in_wh_1 = Yes
+        // bill_no = blank
+        // instock = Yes
+        // Received In UAE = Yes
+        if (isBsOrderEntry) {
+          fields[instockField!.name] = valueForYesField(instockField!);
+          fields[billNoField!.name] = valueForBlankField(billNoField!);
         }
       }
 

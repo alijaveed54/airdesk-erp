@@ -112,14 +112,6 @@ export default function SupplierActivityReportPage() {
     loadReport();
   }, []);
 
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      loadReport(true);
-    }, 30000);
-
-    return () => window.clearInterval(timer);
-  }, [supplier, billNo, status, todayOnly, activityDate]);
-
   const groupedRows = useMemo(() => {
     return {
       soldOut: rows.filter((row) => row.status === "Sold Out"),
@@ -331,7 +323,7 @@ export default function SupplierActivityReportPage() {
         </div>
 
         <p className="mt-3 text-xs font-bold text-slate-400">
-          Auto refresh: every 30 seconds
+          Manual refresh • Background auto-refresh is off to reduce API usage
           {lastUpdated
             ? ` • Last updated: ${formatDateTime(lastUpdated.toISOString())}`
             : ""}

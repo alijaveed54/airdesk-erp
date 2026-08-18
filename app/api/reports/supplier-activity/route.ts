@@ -709,6 +709,7 @@ async function fetchSource(
   supplier: string,
   status: string,
   billNo: string,
+  activityDateKey: string,
   includeCustomerDetails: boolean,
 ) {
   const f = source.fields;
@@ -732,6 +733,17 @@ async function fetchSource(
   if (billNo) {
     filters.push(
       `LOWER({${f.billNo}} & '')=LOWER('${escapeAirtableString(billNo)}')`,
+    );
+  }
+
+  // SUPPLIER_ACTIVITY_OPT_V1
+  // Push the selected Karachi activity date into Airtable so the route does not
+  // fetch historical activity rows and discard them afterwards.
+  if (activityDateKey) {
+    filters.push(
+      `DATETIME_FORMAT(SET_TIMEZONE({${f.activityDateTime}}, 'Asia/Karachi'), 'YYYY-MM-DD')='${escapeAirtableString(
+        activityDateKey,
+      )}'`,
     );
   }
 
@@ -895,6 +907,9 @@ export async function GET(request: Request) {
     const billNo = searchParams.get("billNo")?.trim() || "";
     const activityDate = searchParams.get("activityDate")?.trim() || "";
     const todayOnly = searchParams.get("todayOnly") === "1";
+    const activityDateKey =
+      activityDate ||
+      (todayOnly ? formatKarachiDate(new Date().toISOString()) : "");
 
     if (isSupplier && !supplierCode) {
       return NextResponse.json(
@@ -917,7 +932,15 @@ export async function GET(request: Request) {
             error: null,
           });
         }
-        return fetchSource(token, source, supplierCode, status, billNo, !isSupplier);
+        return fetchSource(
+          token,
+          source,
+          supplierCode,
+          status,
+          billNo,
+          activityDateKey,
+          !isSupplier,
+        );
       }),
     );
 
@@ -939,6 +962,8 @@ export async function GET(request: Request) {
 
     let rows = allRows;
 
+    // Defensive exact-date check. The same date filter is already applied in
+    // Airtable above; this preserves the previous Karachi-date behavior.
     if (activityDate) {
       rows = rows.filter(
         (row) => formatKarachiDate(row.activityDateTime) === activityDate,

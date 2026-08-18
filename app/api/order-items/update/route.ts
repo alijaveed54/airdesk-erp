@@ -83,6 +83,21 @@ function valueForField(
   return text;
 }
 
+function valueForYesField(field: AirtableSchemaField): unknown {
+  if (field.type === "checkbox") return true;
+  if (field.type === "number" || field.type === "currency" || field.type === "percent") return 1;
+  if (field.type === "multipleSelects") return ["Yes"];
+  return "Yes";
+}
+
+function valueForBlankField(field: AirtableSchemaField): unknown {
+  if (field.type === "checkbox") return false;
+  if (field.type === "multipleSelects") return [];
+  if (field.type === "singleSelect") return null;
+  if (field.type === "number" || field.type === "currency" || field.type === "percent") return null;
+  return "";
+}
+
 function isYesValue(value: unknown) {
   if (value === true || value === 1) return true;
 
@@ -291,6 +306,12 @@ export async function PATCH(req: NextRequest) {
         "Received in UAE",
         "received_in_uae",
       ]),
+      inStock: findWritableField(schemaFields, [
+        "instock",
+        "In Stock",
+        "Instock",
+        "InStock",
+      ]),
       billNo: findWritableField(schemaFields, [
         "bill_no",
         "Bill No",
@@ -317,6 +338,36 @@ export async function PATCH(req: NextRequest) {
       ]),
     };
 
+    const isBsOrderEntry =
+      airtable.baseId === "app2hjpuQoeEL1Rn2" &&
+      orderEntryTable === "BS Order Entry";
+
+    const hasBsInstockUpdate =
+      isBsOrderEntry &&
+      items.some(
+        (item: any) =>
+          item?.receivedWh !== undefined && isYesValue(item.receivedWh)
+      );
+
+    if (hasBsInstockUpdate) {
+      const missingFields = [
+        !fieldMap.receivedWh ? "received_in_wh_1" : "",
+        !fieldMap.billNo ? "bill_no" : "",
+        !fieldMap.inStock ? "instock" : "",
+        !fieldMap.receivedInUae ? "Received In UAE" : "",
+      ].filter(Boolean);
+
+      if (missingFields.length > 0) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: `BS In Stock item fields missing or read-only: ${missingFields.join(", ")}`,
+          },
+          { status: 400 }
+        );
+      }
+    }
+
     if (!fieldMap.quantity) {
       return NextResponse.json(
         {
@@ -328,6 +379,11 @@ export async function PATCH(req: NextRequest) {
     }
 
     const records = items.map((item: any) => {
+      const markAsBsInstock =
+        isBsOrderEntry &&
+        item?.receivedWh !== undefined &&
+        isYesValue(item.receivedWh);
+
       const fields: Record<string, unknown> = {
         [fieldMap.quantity!.name]: valueForField(
           fieldMap.quantity!,
@@ -352,14 +408,27 @@ export async function PATCH(req: NextRequest) {
           isYesValue(item.receivedWh) &&
           fieldMap.receivedInUae
         ) {
-          fields[fieldMap.receivedInUae.name] = valueForField(
-            fieldMap.receivedInUae,
-            "Yes"
+          fields[fieldMap.receivedInUae.name] = valueForYesField(
+            fieldMap.receivedInUae
           );
+        }
+
+        if (markAsBsInstock) {
+          // Locked BS Order Entry In Stock rule:
+          // received_in_wh_1 = Yes
+          // bill_no = blank
+          // instock = Yes
+          // Received In UAE = Yes
+          fields[fieldMap.inStock!.name] = valueForYesField(fieldMap.inStock!);
+          fields[fieldMap.billNo!.name] = valueForBlankField(fieldMap.billNo!);
         }
       }
 
-      if (fieldMap.billNo && item.billNo !== undefined) {
+      if (
+        fieldMap.billNo &&
+        item.billNo !== undefined &&
+        !markAsBsInstock
+      ) {
         fields[fieldMap.billNo.name] = valueForField(
           fieldMap.billNo,
           item.billNo
@@ -507,6 +576,7 @@ export async function PATCH(req: NextRequest) {
         supplier: fieldMap.supplier?.name || null,
         receivedWh: fieldMap.receivedWh?.name || null,
         receivedInUae: fieldMap.receivedInUae?.name || null,
+        inStock: fieldMap.inStock?.name || null,
         billNo: fieldMap.billNo?.name || null,
         size: fieldMap.size?.name || null,
         singlePrice: fieldMap.singlePrice?.name || null,

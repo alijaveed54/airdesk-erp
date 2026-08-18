@@ -165,6 +165,11 @@ const ageSummary = lines.reduce(
   const [isSupplierUser, setIsSupplierUser] = useState(false);
   const [currentUserRole, setCurrentUserRole] = useState("");
   const [manualBillNo, setManualBillNo] = useState("");
+  const [whatsappSendingId, setWhatsappSendingId] = useState("");
+
+  const canUseInternalSupplierTools =
+    Boolean(currentUserRole) &&
+    currentUserRole.trim().toLowerCase() !== "supplier";
 
   const canCustomizeBillNo = ["admin", "manager", "employee", "staff"].includes(
     currentUserRole.trim().toLowerCase()
@@ -239,7 +244,10 @@ const ageSummary = lines.reduce(
     setLoading(false);
   }
 
-  async function updateLine(lineId: string, action: "dispatch" | "stock_out") {
+  async function updateLine(
+    lineId: string,
+    action: "dispatch" | "stock_out" | "instock",
+  ) {
     const line = lines.find((item) => item.id === lineId);
 
     if (!line?._baseId || !line?._tableName) {
@@ -285,6 +293,89 @@ const ageSummary = lines.reduce(
       setUpdatingId("");
     }
   }
+async function sharePendingLinesToWhatsApp(
+  targetLines: SupplierLine[],
+  sendingKey: string,
+) {
+  if (!canUseInternalSupplierTools) return;
+
+  if (targetLines.length === 0) {
+    alert("No pending items selected.");
+    return;
+  }
+
+  setWhatsappSendingId(sendingKey);
+
+  try {
+    const res = await fetch("/api/suppliers/share-image", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        records: targetLines.map((line) => ({
+          lineId: line.id,
+          baseId: line._baseId,
+          tableName: line._tableName,
+        })),
+      }),
+    });
+
+    const responseText = await res.text();
+    let data: any = null;
+
+    try {
+      data = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      data = null;
+    }
+
+    if (!res.ok || !data?.success) {
+      alert(data?.message || "WhatsApp send failed");
+      return;
+    }
+
+    const failed = Number(data.failed || 0);
+    const sent = Number(data.sent || 0);
+    const failureText =
+      Array.isArray(data.failures) && data.failures.length
+        ? `\n\nFailed:\n${data.failures.slice(0, 10).join("\n")}`
+        : "";
+
+    alert(
+      failed > 0
+        ? `WhatsApp completed. Sent: ${sent}, Failed: ${failed}${failureText}`
+        : `WhatsApp sent successfully: ${sent} item(s).`,
+    );
+  } catch (error) {
+    console.error("Supplier pending WhatsApp send failed:", error);
+    alert("WhatsApp send failed");
+  } finally {
+    setWhatsappSendingId("");
+  }
+}
+
+async function bulkSharePendingToWhatsApp() {
+  const targetLines =
+    selectedRows.length > 0
+      ? lines.filter((line) => selectedRows.includes(line.id))
+      : lines;
+
+  if (targetLines.length === 0) {
+    alert("No pending items to send.");
+    return;
+  }
+
+  const scopeLabel = selectedRows.length > 0 ? "selected" : "all pending";
+  if (
+    !confirm(
+      `Send ${targetLines.length} ${scopeLabel} item(s) to the Dispatch WhatsApp group?`,
+    )
+  ) {
+    return;
+  }
+
+  await sharePendingLinesToWhatsApp(targetLines, "bulk");
+}
+
 async function bulkUpdate(action: "dispatch" | "stock_out") {
   if (selectedRows.length === 0) {
     alert("Please select at least one row.");
@@ -569,6 +660,21 @@ function exportToExcel() {
       Export Excel
     </button>
 
+    {canUseInternalSupplierTools && (
+      <button
+        type="button"
+        onClick={bulkSharePendingToWhatsApp}
+        disabled={lines.length === 0 || Boolean(whatsappSendingId) || Boolean(updatingId)}
+        className="rounded-xl border border-emerald-700 bg-emerald-600 px-4 py-2 text-sm font-black text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50"
+      >
+        {whatsappSendingId === "bulk"
+          ? "Sending WhatsApp..."
+          : selectedRows.length > 0
+            ? `WhatsApp Selected (${selectedRows.length})`
+            : `WhatsApp All Pending (${lines.length})`}
+      </button>
+    )}
+
     {canCustomizeBillNo && (
       <div className="min-w-[240px]">
         <label className="mb-1 block text-xs font-black text-slate-600">
@@ -605,7 +711,7 @@ function exportToExcel() {
   </div>
 )}
         <div className="overflow-auto rounded-2xl border border-slate-200">
-          <table className="w-full min-w-[1120px] border-collapse text-sm">
+          <table className="w-full min-w-[1360px] border-collapse text-sm">
             <thead className="bg-slate-200 text-slate-900">
               <tr>
                 <th className="px-4 py-4 text-left">
@@ -726,6 +832,42 @@ const dispatchToIndia = isIndiaDispatch(line);
 
                     <td className="px-4 py-3 text-right">
                       <div className="flex justify-end gap-2">
+                        {canUseInternalSupplierTools && (
+                          <>
+                            <button
+                              type="button"
+                              disabled={Boolean(whatsappSendingId) || Boolean(updatingId)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void sharePendingLinesToWhatsApp([line], line.id);
+                              }}
+                              className="h-10 rounded-[10px] border border-emerald-700 bg-emerald-600 px-3 font-black text-white hover:bg-emerald-700 disabled:opacity-50"
+                            >
+                              {whatsappSendingId === line.id
+                                ? "Sending..."
+                                : "WhatsApp"}
+                            </button>
+
+                            <button
+                              type="button"
+                              disabled={updatingId === line.id || Boolean(whatsappSendingId)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (
+                                  confirm(
+                                    `Convert ${orderNo} - ${itemCode} to In Stock?`,
+                                  )
+                                ) {
+                                  void updateLine(line.id, "instock");
+                                }
+                              }}
+                              className="h-10 rounded-[10px] border border-indigo-700 bg-indigo-600 px-3 font-black text-white hover:bg-indigo-700 disabled:opacity-50"
+                            >
+                              In Stock
+                            </button>
+                          </>
+                        )}
+
                         <button
                           type="button"
                           disabled={updatingId === line.id}

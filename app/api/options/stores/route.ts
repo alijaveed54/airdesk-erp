@@ -29,6 +29,27 @@ type SchemaTable = {
   fields?: SchemaField[];
 };
 
+type CacheEntry<T> = {
+  value: T;
+  expiresAt: number;
+};
+
+type StoreOptionsResult = {
+  options: string[];
+  tableName: string;
+  fieldName: string;
+  cacheable: boolean;
+};
+
+const CACHE_TTL_MS = 5 * 60 * 1000;
+const schemaCache = new Map<string, CacheEntry<SchemaTable[]>>();
+const schemaRequestCache = new Map<string, Promise<SchemaTable[]>>();
+const storeOptionsCache = new Map<
+  string,
+  CacheEntry<Omit<StoreOptionsResult, "cacheable">>
+>();
+const storeOptionsRequestCache = new Map<string, Promise<StoreOptionsResult>>();
+
 function normalize(value: unknown) {
   return String(value ?? "")
     .trim()
@@ -179,6 +200,51 @@ async function fetchJson(url: string, token: string) {
   return data;
 }
 
+async function loadSchema(baseId: string, token: string) {
+  const now = Date.now();
+  const cached = schemaCache.get(baseId);
+
+  if (cached && cached.expiresAt > now) {
+    return cached.value;
+  }
+
+  const inFlight = schemaRequestCache.get(baseId);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const request = (async () => {
+    const schemaUrl =
+      `https://api.airtable.com/v0/meta/bases/` +
+      `${encodeURIComponent(baseId)}/tables`;
+    const schema = await fetchJson(schemaUrl, token);
+    const tables = (schema.tables || []) as SchemaTable[];
+
+    schemaCache.set(baseId, {
+      value: tables,
+      expiresAt: Date.now() + CACHE_TTL_MS,
+    });
+
+    return tables;
+  })();
+
+  schemaRequestCache.set(baseId, request);
+
+  try {
+    return await request;
+  } finally {
+    schemaRequestCache.delete(baseId);
+  }
+}
+
+function storeOptionsCacheKey(baseId: string, base: SessionBase) {
+  return [
+    baseId,
+    normalize(base.baseName),
+    normalize(base.invoiceTable),
+  ].join("|");
+}
+
 async function loadObservedStoreValues({
   baseId,
   token,
@@ -288,6 +354,91 @@ async function loadLinkedStoreNames({
   return values;
 }
 
+async function resolveStoreOptions({
+  tables,
+  base,
+  baseId,
+  token,
+}: {
+  tables: SchemaTable[];
+  base: SessionBase;
+  baseId: string;
+  token: string;
+}): Promise<StoreOptionsResult> {
+  const invoiceTable = findInvoiceTable(tables, base);
+
+  if (!invoiceTable?.name) {
+    return {
+      options: [],
+      tableName: "",
+      fieldName: "",
+      cacheable: false,
+    };
+  }
+
+  const storeField = findStoreField(invoiceTable.fields || []);
+
+  if (!storeField?.name) {
+    return {
+      options: [],
+      tableName: invoiceTable.name,
+      fieldName: "",
+      cacheable: false,
+    };
+  }
+
+  const configuredChoices =
+    storeField.options?.choices
+      ?.map((choice) => choice.name || "")
+      .filter(Boolean) || [];
+
+  let linkedStoreNames: string[] = [];
+  let observedValues: string[] = [];
+  let resolvedSuccessfully = configuredChoices.length > 0;
+
+  if (storeField.options?.linkedTableId) {
+    try {
+      linkedStoreNames = await loadLinkedStoreNames({
+        tables,
+        field: storeField,
+        baseId,
+        token,
+      });
+      resolvedSuccessfully = true;
+    } catch {
+      // Preserve current behavior: fall back to observed invoice values.
+    }
+  }
+
+  if (
+    configuredChoices.length === 0 &&
+    linkedStoreNames.length === 0
+  ) {
+    try {
+      observedValues = await loadObservedStoreValues({
+        baseId,
+        token,
+        tableName: invoiceTable.name,
+        fieldName: storeField.name,
+      });
+      resolvedSuccessfully = true;
+    } catch {
+      // Preserve current behavior: return empty options instead of breaking Invoice Basic.
+    }
+  }
+
+  return {
+    options: uniqueOptions([
+      ...configuredChoices,
+      ...linkedStoreNames,
+      ...observedValues,
+    ]),
+    tableName: invoiceTable.name,
+    fieldName: storeField.name,
+    cacheable: resolvedSuccessfully,
+  };
+}
+
 export async function GET(request: Request) {
   try {
     const session = (await getSession()) as any;
@@ -370,16 +521,57 @@ export async function GET(request: Request) {
       throw new Error("Airtable token missing");
     }
 
-    const schemaUrl =
-      `https://api.airtable.com/v0/meta/bases/` +
-      `${encodeURIComponent(resolvedBaseId)}/tables`;
+    const cacheKey = storeOptionsCacheKey(resolvedBaseId, base);
+    const cachedOptions = storeOptionsCache.get(cacheKey);
+    const now = Date.now();
 
-    const schema = await fetchJson(schemaUrl, token);
-    const tables = (schema.tables || []) as SchemaTable[];
+    if (cachedOptions && cachedOptions.expiresAt > now) {
+      return NextResponse.json({
+        success: true,
+        options: cachedOptions.value.options,
+        baseId: resolvedBaseId,
+        baseName: String(base.baseName || ""),
+        tableName: cachedOptions.value.tableName,
+        fieldName: cachedOptions.value.fieldName,
+      });
+    }
 
-    const invoiceTable = findInvoiceTable(tables, base);
+    const inFlightRequest = storeOptionsRequestCache.get(cacheKey);
 
-    if (!invoiceTable?.name) {
+let resolved: StoreOptionsResult;
+
+if (inFlightRequest) {
+  try {
+    resolved = await inFlightRequest;
+  } finally {
+    if (storeOptionsRequestCache.get(cacheKey) === inFlightRequest) {
+      storeOptionsRequestCache.delete(cacheKey);
+    }
+  }
+} else {
+  const newRequest = (async () => {
+    const tables = await loadSchema(resolvedBaseId, token);
+
+    return resolveStoreOptions({
+      tables,
+      base,
+      baseId: resolvedBaseId,
+      token,
+    });
+  })();
+
+  storeOptionsRequestCache.set(cacheKey, newRequest);
+
+  try {
+    resolved = await newRequest;
+  } finally {
+    if (storeOptionsRequestCache.get(cacheKey) === newRequest) {
+      storeOptionsRequestCache.delete(cacheKey);
+    }
+  }
+}
+
+    if (!resolved.tableName) {
       return NextResponse.json({
         success: true,
         options: [],
@@ -388,70 +580,34 @@ export async function GET(request: Request) {
       });
     }
 
-    const storeField = findStoreField(
-      invoiceTable.fields || [],
-    );
-
-    if (!storeField?.name) {
+    if (!resolved.fieldName) {
       return NextResponse.json({
         success: true,
         options: [],
         baseId: resolvedBaseId,
-        tableName: invoiceTable.name,
+        tableName: resolved.tableName,
         message: "Store field not found",
       });
     }
 
-    const configuredChoices =
-      storeField.options?.choices
-        ?.map((choice) => choice.name || "")
-        .filter(Boolean) || [];
-
-    let linkedStoreNames: string[] = [];
-    let observedValues: string[] = [];
-
-    if (storeField.options?.linkedTableId) {
-      try {
-        linkedStoreNames = await loadLinkedStoreNames({
-          tables,
-          field: storeField,
-          baseId: resolvedBaseId,
-          token,
-        });
-      } catch {
-        // Fall back to observed invoice values.
-      }
+    if (resolved.cacheable) {
+      storeOptionsCache.set(cacheKey, {
+        value: {
+          options: resolved.options,
+          tableName: resolved.tableName,
+          fieldName: resolved.fieldName,
+        },
+        expiresAt: Date.now() + CACHE_TTL_MS,
+      });
     }
-
-    if (
-      configuredChoices.length === 0 &&
-      linkedStoreNames.length === 0
-    ) {
-      try {
-        observedValues = await loadObservedStoreValues({
-          baseId: resolvedBaseId,
-          token,
-          tableName: invoiceTable.name,
-          fieldName: storeField.name,
-        });
-      } catch {
-        // Return empty options instead of breaking Invoice Basic.
-      }
-    }
-
-    const options = uniqueOptions([
-      ...configuredChoices,
-      ...linkedStoreNames,
-      ...observedValues,
-    ]);
 
     return NextResponse.json({
       success: true,
-      options,
+      options: resolved.options,
       baseId: resolvedBaseId,
       baseName: String(base.baseName || ""),
-      tableName: invoiceTable.name,
-      fieldName: storeField.name,
+      tableName: resolved.tableName,
+      fieldName: resolved.fieldName,
     });
   } catch (error) {
     return NextResponse.json(

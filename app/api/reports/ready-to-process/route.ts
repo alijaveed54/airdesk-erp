@@ -254,11 +254,13 @@ function groupReceivedSegments(
     .sort((first, second) => first.firstIndex - second.firstIndex)
     .map((bucket) => {
       const label =
-        bucket.kind === "new"
-          ? `${formatQty(bucket.qty)} New ${bucket.supplier}`
-          : bucket.kind === "old"
-            ? `${formatQty(bucket.qty)} Old ${bucket.supplier}`
-            : `${formatQty(bucket.qty)} ${bucket.supplier}`;
+        bucket.kind === "old" && bucket.supplier === "No Supplier"
+          ? `${formatQty(bucket.qty)} Instck`
+          : bucket.kind === "new"
+            ? `${formatQty(bucket.qty)} New ${bucket.supplier}`
+            : bucket.kind === "old"
+              ? `${formatQty(bucket.qty)} Old ${bucket.supplier}`
+              : `${formatQty(bucket.qty)} ${bucket.supplier}`;
 
       return {
         key: bucket.key,
@@ -370,6 +372,95 @@ async function fetchOrderEntryRows(token: string) {
   });
 }
 
+async function buildReadySnapshot(token: string) {
+  const todayKey = pakistanDateKey(new Date());
+  const records = await fetchOrderEntryRows(token);
+  const grouped = new Map<string, ItemLine[]>();
+
+  records.forEach((record: any, sourceIndex: number) => {
+    const fields = record.fields || {};
+    const orderNo = cleanText(fields[FIELDS.orderNo]);
+    const quantity = quantityValue(fields[FIELDS.quantity]);
+    const orderStatus =
+      cleanText(fields[FIELDS.orderStatus]) ||
+      cleanText(fields[FIELDS.orderStatusAlternative]);
+
+    if (
+      !orderNo ||
+      quantity <= 0 ||
+      normalizeStatus(orderStatus) !== "order received"
+    ) {
+      return;
+    }
+
+    const receivedInWh1 = isYesValue(fields[FIELDS.receivedInWh1]);
+    const supplierActivity = cleanText(fields[FIELDS.supplierActivity]);
+    const activityDateTime = cleanText(fields[FIELDS.activityDateTime]);
+    const receivedInUaeDateTime = cleanText(
+      fields[FIELDS.receivedInUaeDateTime],
+    );
+    const receivedInUae = isYesValue(fields[FIELDS.receivedInUae]);
+    const line: ItemLine = {
+      recordId: record.id,
+      orderNo,
+      itemCode: cleanText(fields[FIELDS.itemCode]),
+      quantity,
+      supplier: cleanText(fields[FIELDS.supplier]),
+      inStock: isInStockValue(fields[FIELDS.inStock]),
+      receivedInUae,
+      receivedInWh1,
+      soldOut: isSoldOutValue(fields[FIELDS.soldOut]),
+      processed: isYesValue(fields[FIELDS.processed]),
+      orderStatus,
+      supplierActivity,
+      activityDateTime,
+      receivedInUaeDateTime,
+      age: classifyAge({
+        receivedInUae,
+        receivedInUaeDateTime,
+        todayKey,
+      }),
+      sourceIndex,
+    };
+
+    const orderLines = grouped.get(orderNo) || [];
+    orderLines.push(line);
+    grouped.set(orderNo, orderLines);
+  });
+
+  const orders = Array.from(grouped.entries())
+    .map(([orderNo, lines]) => buildReadyOrder(orderNo, lines))
+    .filter((order): order is ReadyOrder => Boolean(order))
+    .sort((first, second) =>
+      second.orderNo.localeCompare(first.orderNo, undefined, {
+        numeric: true,
+        sensitivity: "base",
+      }),
+    );
+
+  const summary = orders.reduce(
+    (result, order) => {
+      result.totalOrders += 1;
+      result.totalPcs += order.totalPcs;
+      result.newPcs += order.newPcs;
+      result.oldPcs += order.oldPcs;
+      result.instockPcs += order.instockPcs;
+      result.undatedReceivedPcs += order.undatedReceivedPcs;
+      return result;
+    },
+    {
+      totalOrders: 0,
+      totalPcs: 0,
+      newPcs: 0,
+      oldPcs: 0,
+      instockPcs: 0,
+      undatedReceivedPcs: 0,
+    },
+  );
+
+  return { todayKey, orders, summary };
+}
+
 export async function GET() {
   try {
     const session = await getSession();
@@ -411,89 +502,7 @@ export async function GET() {
       );
     }
 
-    const todayKey = pakistanDateKey(new Date());
-    const records = await fetchOrderEntryRows(airtable.token);
-    const grouped = new Map<string, ItemLine[]>();
-
-    records.forEach((record: any, sourceIndex: number) => {
-      const fields = record.fields || {};
-      const orderNo = cleanText(fields[FIELDS.orderNo]);
-      const quantity = quantityValue(fields[FIELDS.quantity]);
-      const orderStatus =
-        cleanText(fields[FIELDS.orderStatus]) ||
-        cleanText(fields[FIELDS.orderStatusAlternative]);
-
-      if (
-        !orderNo ||
-        quantity <= 0 ||
-        normalizeStatus(orderStatus) !== "order received"
-      ) {
-        return;
-      }
-
-      const receivedInWh1 = isYesValue(fields[FIELDS.receivedInWh1]);
-      const supplierActivity = cleanText(fields[FIELDS.supplierActivity]);
-      const activityDateTime = cleanText(fields[FIELDS.activityDateTime]);
-      const receivedInUaeDateTime = cleanText(
-        fields[FIELDS.receivedInUaeDateTime],
-      );
-      const receivedInUae = isYesValue(fields[FIELDS.receivedInUae]);
-      const line: ItemLine = {
-        recordId: record.id,
-        orderNo,
-        itemCode: cleanText(fields[FIELDS.itemCode]),
-        quantity,
-        supplier: cleanText(fields[FIELDS.supplier]),
-        inStock: isInStockValue(fields[FIELDS.inStock]),
-        receivedInUae,
-        receivedInWh1,
-        soldOut: isSoldOutValue(fields[FIELDS.soldOut]),
-        processed: isYesValue(fields[FIELDS.processed]),
-        orderStatus,
-        supplierActivity,
-        activityDateTime,
-        receivedInUaeDateTime,
-        age: classifyAge({
-          receivedInUae,
-          receivedInUaeDateTime,
-          todayKey,
-        }),
-        sourceIndex,
-      };
-      const orderLines = grouped.get(orderNo) || [];
-      orderLines.push(line);
-      grouped.set(orderNo, orderLines);
-    });
-
-    const orders = Array.from(grouped.entries())
-      .map(([orderNo, lines]) => buildReadyOrder(orderNo, lines))
-      .filter((order): order is ReadyOrder => Boolean(order))
-      .sort((first, second) =>
-        second.orderNo.localeCompare(first.orderNo, undefined, {
-          numeric: true,
-          sensitivity: "base",
-        }),
-      );
-
-    const summary = orders.reduce(
-      (result, order) => {
-        result.totalOrders += 1;
-        result.totalPcs += order.totalPcs;
-        result.newPcs += order.newPcs;
-        result.oldPcs += order.oldPcs;
-        result.instockPcs += order.instockPcs;
-        result.undatedReceivedPcs += order.undatedReceivedPcs;
-        return result;
-      },
-      {
-        totalOrders: 0,
-        totalPcs: 0,
-        newPcs: 0,
-        oldPcs: 0,
-        instockPcs: 0,
-        undatedReceivedPcs: 0,
-      },
-    );
+    const { todayKey, orders, summary } = await buildReadySnapshot(airtable.token);
 
     return NextResponse.json({
       success: true,
@@ -569,7 +578,41 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const conditions = orderNos.map(
+    const requireReady = body?.requireReady === true;
+    let processOrderNos = orderNos;
+    let skippedOrderNos: string[] = [];
+
+    if (requireReady) {
+      const readySnapshot = await buildReadySnapshot(airtable.token);
+      const readyOrderNos = new Set(
+        readySnapshot.orders.map((order) =>
+          order.orderNo.trim().toLowerCase(),
+        ),
+      );
+
+      processOrderNos = orderNos.filter((orderNo) =>
+        readyOrderNos.has(orderNo.trim().toLowerCase()),
+      );
+      skippedOrderNos = orderNos.filter(
+        (orderNo) => !readyOrderNos.has(orderNo.trim().toLowerCase()),
+      );
+
+      if (processOrderNos.length === 0) {
+        return NextResponse.json(
+          {
+            success: false,
+            code: "NO_READY_ORDERS",
+            message:
+              "Selected order(s) current Ready-to-Process rule pass nahi karte.",
+            processedOrderNos: [],
+            skippedOrderNos,
+          },
+          { status: 400 },
+        );
+      }
+    }
+
+    const conditions = processOrderNos.map(
       (orderNo) => `{${BS_INVOICE_ORDER_FIELD}}='${escapeAirtableText(orderNo)}'`,
     );
 
@@ -598,7 +641,7 @@ export async function POST(request: NextRequest) {
     const updates = invoiceRecords.map((record: any) => ({
       id: record.id,
       fields: {
-        [BS_INVOICE_PROCESSING_FIELD]: "Yes",
+        [BS_INVOICE_PROCESSING_FIELD]: "Add",
       },
     }));
 
@@ -616,13 +659,17 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      message: `${updates.length} order${updates.length === 1 ? "" : "s"} sent to Processing`,
+      message:
+        `${updates.length} order${updates.length === 1 ? "" : "s"} sent to Processing` +
+        (skippedOrderNos.length > 0
+          ? `; ${skippedOrderNos.length} selected order${skippedOrderNos.length === 1 ? "" : "s"} skipped because they are not Ready to Process`
+          : ""),
       processedOrderNos: invoiceRecords.map((record: any) =>
         cleanText(record.fields?.[BS_INVOICE_ORDER_FIELD]),
       ),
+      skippedOrderNos,
     });
   } catch (error) {
     return handleApiError(error, "Order processing update failed");
   }
 }
-

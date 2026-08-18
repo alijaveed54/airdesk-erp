@@ -14,17 +14,24 @@ export type PublicStockProduct = {
 type Props = {
   product: PublicStockProduct;
   onImageClick: (product: PublicStockProduct) => void;
+  currency?: string;
+  whatsAppNumber?: string;
 };
 
-const WHATSAPP_NUMBER = "97430454914";
+const DEFAULT_WHATSAPP_NUMBER = "97430454914";
 
-export default function ProductCard({ product, onImageClick }: Props) {
+export default function ProductCard({
+  product,
+  onImageClick,
+  currency = "QAR",
+  whatsAppNumber = DEFAULT_WHATSAPP_NUMBER,
+}: Props) {
   function openWhatsApp() {
     const details = [
       "Hello, I am interested in this product:",
       "",
       `SKU: ${product.sku}`,
-      `Price: QAR ${product.price.toLocaleString("en-US")}`,
+      `Price: ${currency} ${product.price.toLocaleString("en-US")}`,
       `Available Stock: ${product.balanceStock}`,
       product.category ? `Category: ${product.category}` : "",
       product.color ? `Color: ${product.color}` : "",
@@ -33,11 +40,11 @@ export default function ProductCard({ product, onImageClick }: Props) {
       .filter(Boolean)
       .join("\n");
 
-    window.open(
-      `https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(details)}`,
-      "_blank",
-      "noopener,noreferrer",
-    );
+    const target = whatsAppNumber
+      ? `https://wa.me/${whatsAppNumber}?text=${encodeURIComponent(details)}`
+      : `https://wa.me/?text=${encodeURIComponent(details)}`;
+
+    window.open(target, "_blank", "noopener,noreferrer");
   }
 
   return (
@@ -74,7 +81,7 @@ export default function ProductCard({ product, onImageClick }: Props) {
         </div>
 
         <p className="mt-1 text-lg font-black text-slate-950">
-          QAR {product.price.toLocaleString("en-US")}
+          {currency} {product.price.toLocaleString("en-US")}
         </p>
 
         <div className="mt-2 min-h-14">

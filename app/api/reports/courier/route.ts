@@ -62,6 +62,13 @@ type BaseReport = {
   };
 };
 
+const SCHEMA_CACHE_TTL_MS = 5 * 60 * 1000;
+const schemaCache = new Map<
+  string,
+  { tables: SchemaTable[]; expiresAt: number }
+>();
+const schemaRequestCache = new Map<string, Promise<SchemaTable[]>>();
+
 function normalize(value: unknown) {
   return String(value ?? "").trim().toLowerCase();
 }
@@ -141,23 +148,48 @@ function resolveToken(base: SessionBase) {
 }
 
 async function getSchema(baseId: string, token: string) {
-  const response = await fetch(
-    `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(baseId)}/tables`,
-    {
-      headers: { Authorization: `Bearer ${token}` },
-      cache: "no-store",
-    }
-  );
+  const now = Date.now();
+  const cached = schemaCache.get(baseId);
 
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(
-      data?.error?.message || `Schema load failed for ${baseId}`
-    );
+  if (cached && cached.expiresAt > now) {
+    return cached.tables;
   }
 
-  return (data.tables || []) as SchemaTable[];
+  const inFlight = schemaRequestCache.get(baseId);
+  if (inFlight) return inFlight;
+
+  const request = (async () => {
+    const response = await fetch(
+      `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(baseId)}/tables`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: "no-store",
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data?.error?.message || `Schema load failed for ${baseId}`
+      );
+    }
+
+    const tables = (data.tables || []) as SchemaTable[];
+    schemaCache.set(baseId, {
+      tables,
+      expiresAt: Date.now() + SCHEMA_CACHE_TTL_MS,
+    });
+    return tables;
+  })();
+
+  schemaRequestCache.set(baseId, request);
+
+  try {
+    return await request;
+  } finally {
+    schemaRequestCache.delete(baseId);
+  }
 }
 
 function findInvoiceTable(
@@ -199,11 +231,13 @@ async function fetchAllRecords({
   token,
   tableName,
   fields,
+  filterByFormula,
 }: {
   baseId: string;
   token: string;
   tableName: string;
   fields: string[];
+  filterByFormula?: string;
 }) {
   const records: any[] = [];
   let offset = "";
@@ -214,6 +248,10 @@ async function fetchAllRecords({
 
     for (const field of fields) {
       if (field) params.append("fields[]", field);
+    }
+
+    if (filterByFormula) {
+      params.set("filterByFormula", filterByFormula);
     }
 
     if (offset) params.set("offset", offset);
@@ -239,6 +277,56 @@ async function fetchAllRecords({
   } while (offset);
 
   return records;
+}
+
+function schemaFieldByName(fields: SchemaField[], fieldName: string) {
+  return fields.find((field) => field.name === fieldName);
+}
+
+function isDirectDateField(field: SchemaField | undefined) {
+  return Boolean(
+    field &&
+      ["date", "dateTime", "createdTime", "lastModifiedTime"].includes(
+        String(field.type || "")
+      )
+  );
+}
+
+function buildCourierRelevantFormula({
+  dispatchDateField,
+  statusField,
+  month,
+}: {
+  dispatchDateField: string;
+  statusField: string;
+  month: string;
+}) {
+  // One Airtable query returns the union needed by the existing report:
+  // 1) a timezone-safe superset around the selected month, and
+  // 2) dispatched rows older than 7 days for the persistent old-orders list.
+  // Existing JS month/day checks remain authoritative after fetch, so boundary
+  // dates and the exact >7-day rule keep the current behavior.
+  const match = /^(\d{4})-(\d{2})$/.exec(month);
+  if (!match) throw new Error("Invalid report month");
+
+  const year = Number(match[1]);
+  const monthIndex = Number(match[2]) - 1;
+  const startBuffer = new Date(Date.UTC(year, monthIndex, 0));
+  const endBuffer = new Date(Date.UTC(year, monthIndex + 1, 2));
+  const dateKey = (date: Date) => date.toISOString().slice(0, 10);
+
+  const monthRows =
+    `AND({${dispatchDateField}}!='',` +
+    `IS_AFTER({${dispatchDateField}},DATETIME_PARSE('${dateKey(startBuffer)}','YYYY-MM-DD')),` +
+    `IS_BEFORE({${dispatchDateField}},DATETIME_PARSE('${dateKey(endBuffer)}','YYYY-MM-DD')),` +
+    `LOWER({${statusField}}&'')!='order received')`;
+
+  const oldDispatchedRows =
+    `AND({${dispatchDateField}}!='',` +
+    `FIND('dispatch',LOWER({${statusField}}&''))>0,` +
+    `IS_BEFORE({${dispatchDateField}},DATEADD(NOW(),-7,'days')))`;
+
+  return `OR(${monthRows},${oldDispatchedRows})`;
 }
 
 function monthMatches(value: any, month: string) {
@@ -455,23 +543,57 @@ export async function GET(request: Request) {
           );
         }
 
-        const records = await fetchAllRecords({
-          baseId: base.baseId,
-          token,
-          tableName: invoiceTable.name,
-          fields: [
-            deliveryField,
-            statusField,
-            dispatchDateField,
-            storeField,
-            valueField,
-            orderNoField,
-            numberField,
-            resendField,
-            customerField,
-            phoneField,
-          ].filter(Boolean),
-        });
+        const requestedFields = [
+          deliveryField,
+          statusField,
+          dispatchDateField,
+          storeField,
+          valueField,
+          orderNoField,
+          numberField,
+          resendField,
+          customerField,
+          phoneField,
+        ].filter(Boolean);
+
+        const dispatchDateSchemaField = schemaFieldByName(
+          fields,
+          dispatchDateField
+        );
+
+        let records: any[];
+
+        if (isDirectDateField(dispatchDateSchemaField)) {
+          try {
+            records = await fetchAllRecords({
+              baseId: base.baseId,
+              token,
+              tableName: invoiceTable.name,
+              fields: requestedFields,
+              filterByFormula: buildCourierRelevantFormula({
+                dispatchDateField,
+                statusField,
+                month,
+              }),
+            });
+          } catch {
+            // Legacy / unusual Airtable date configuration fallback:
+            // preserve the original full-scan behavior instead of breaking report output.
+            records = await fetchAllRecords({
+              baseId: base.baseId,
+              token,
+              tableName: invoiceTable.name,
+              fields: requestedFields,
+            });
+          }
+        } else {
+          records = await fetchAllRecords({
+            baseId: base.baseId,
+            token,
+            tableName: invoiceTable.name,
+            fields: requestedFields,
+          });
+        }
 
         const rows = new Map<string, CourierRow>();
         const oldOrders: OldOrderRow[] = [];
@@ -663,3 +785,4 @@ export async function GET(request: Request) {
     );
   }
 }
+
