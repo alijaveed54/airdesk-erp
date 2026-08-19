@@ -14,7 +14,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   AIResponse,
@@ -106,6 +106,7 @@ const COLOR_OPTIONS = [
   "Other",
 ] as const;
 const GALLERY_FOLDER_PAGE_SIZE = 1000;
+const GALLERY_REQUEST_TIMEOUT_MS = 90_000;
 
 type PaginatedGalleryResponse = GalleryResponse & {
   pagination?: {
@@ -114,6 +115,44 @@ type PaginatedGalleryResponse = GalleryResponse & {
     pageSize?: number;
   };
 };
+
+async function fetchGalleryBatch(cursor = "") {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(
+    () => controller.abort(),
+    GALLERY_REQUEST_TIMEOUT_MS,
+  );
+
+  try {
+    const params = new URLSearchParams({
+      folderLimit: String(GALLERY_FOLDER_PAGE_SIZE),
+    });
+
+    if (cursor) params.set("cursor", cursor);
+
+    const response = await fetch(`/api/r2/images?${params.toString()}`, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    const result = (await response.json()) as PaginatedGalleryResponse;
+
+    if (!response.ok || !result.success) {
+      throw new Error(result.message || "Gallery load failed");
+    }
+
+    return result;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error(
+        "R2 request 90 seconds se zyada le rahi thi, is liye stop kar di gayi. Dobara try karein.",
+      );
+    }
+
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
 
 function mergeGalleryGroups(
   current: GalleryGroup[],
@@ -192,24 +231,29 @@ export default function R2GalleryPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadingFilterRecords, setLoadingFilterRecords] = useState(false);
   const [filterLoadProgress, setFilterLoadProgress] = useState("");
+  const galleryRequestLockRef = useRef(false);
 
   const loadGallery = useCallback(async (cursor = "") => {
     const isLoadMore = Boolean(cursor);
+
+    if (galleryRequestLockRef.current) return;
+    galleryRequestLockRef.current = true;
+
     if (isLoadMore) setLoadingMore(true);
     else setLoading(true);
     setError("");
 
     try {
-      const params = new URLSearchParams({
-        folderLimit: String(GALLERY_FOLDER_PAGE_SIZE),
-      });
-      if (cursor) params.set("cursor", cursor);
+      const result = await fetchGalleryBatch(cursor);
+      const returnedCursor = result.pagination?.nextCursor || "";
+      const returnedHasMore = Boolean(result.pagination?.hasMore);
 
-      const response = await fetch(`/api/r2/images?${params.toString()}`);
-      const result = (await response.json()) as PaginatedGalleryResponse;
-
-      if (!response.ok || !result.success) {
-        throw new Error(result.message || "Gallery load failed");
+      if (cursor && returnedHasMore && returnedCursor === cursor) {
+        setNextCursor("");
+        setHasMore(false);
+        throw new Error(
+          "R2 pagination same cursor repeat kar rahi thi. Endless loading prevent karne ke liye load stop kar diya gaya.",
+        );
       }
 
       setGroups((current) => {
@@ -228,13 +272,14 @@ export default function R2GalleryPage() {
         return merged;
       });
 
-      setNextCursor(result.pagination?.nextCursor || "");
-      setHasMore(Boolean(result.pagination?.hasMore));
+      setNextCursor(returnedCursor);
+      setHasMore(returnedHasMore && Boolean(returnedCursor));
     } catch (loadError) {
       setError(
         loadError instanceof Error ? loadError.message : "Gallery load failed",
       );
     } finally {
+      galleryRequestLockRef.current = false;
       if (isLoadMore) setLoadingMore(false);
       else setLoading(false);
     }
@@ -286,47 +331,56 @@ export default function R2GalleryPage() {
       return;
     }
 
-    if (!hasMore || !nextCursor || loadingFilterRecords) return;
+    if (
+      !hasMore ||
+      !nextCursor ||
+      loadingFilterRecords ||
+      loadingMore ||
+      galleryRequestLockRef.current
+    ) {
+      return;
+    }
 
+    galleryRequestLockRef.current = true;
     setLoadingFilterRecords(true);
     setError("");
     setMessage("");
+    setFilterLoadProgress("Loading next batch — max 1,000 folders...");
 
     try {
-      let cursor = nextCursor;
-      let mergedGroups = groups;
-      let loadedBatches = 0;
+      const cursor = nextCursor;
+      const beforeCount = groups.length;
+      const result = await fetchGalleryBatch(cursor);
+      const returnedCursor = result.pagination?.nextCursor || "";
+      const returnedHasMore = Boolean(result.pagination?.hasMore);
 
-      while (cursor) {
-        loadedBatches += 1;
-        setFilterLoadProgress(`Loading batch ${loadedBatches}...`);
-
-        const params = new URLSearchParams({
-          folderLimit: String(GALLERY_FOLDER_PAGE_SIZE),
-          cursor,
-        });
-        const response = await fetch(`/api/r2/images?${params.toString()}`);
-        const result = (await response.json()) as PaginatedGalleryResponse;
-
-        if (!response.ok || !result.success) {
-          throw new Error(result.message || "Filter records load failed");
-        }
-
-        mergedGroups = mergeGalleryGroups(mergedGroups, result.groups || []);
-        setGroups(mergedGroups);
-        setSummary({
-          totalImages: mergedGroups.reduce((sum, group) => sum + group.count, 0),
-          totalSkus: new Set(mergedGroups.map((group) => group.sku)).size,
-          totalGroups: mergedGroups.length,
-          totalSize: mergedGroups.reduce((sum, group) => sum + group.totalSize, 0),
-        });
-
-        cursor = result.pagination?.nextCursor || "";
-        setNextCursor(cursor);
-        setHasMore(Boolean(result.pagination?.hasMore));
+      if (returnedHasMore && returnedCursor === cursor) {
+        setNextCursor("");
+        setHasMore(false);
+        throw new Error(
+          "R2 pagination same cursor repeat kar rahi thi. Endless loading prevent karne ke liye filter load stop kar diya gaya.",
+        );
       }
 
-      setMessage("Selected filter ke tamam matching records load ho gaye.");
+      const mergedGroups = mergeGalleryGroups(groups, result.groups || []);
+      const addedGroups = Math.max(0, mergedGroups.length - beforeCount);
+
+      setGroups(mergedGroups);
+      setSummary({
+        totalImages: mergedGroups.reduce((sum, group) => sum + group.count, 0),
+        totalSkus: new Set(mergedGroups.map((group) => group.sku)).size,
+        totalGroups: mergedGroups.length,
+        totalSize: mergedGroups.reduce((sum, group) => sum + group.totalSize, 0),
+      });
+
+      setNextCursor(returnedCursor);
+      setHasMore(returnedHasMore && Boolean(returnedCursor));
+
+      setMessage(
+        returnedHasMore && returnedCursor
+          ? `1 filter batch load hui — ${addedGroups.toLocaleString()} new folder(s). Aur records hain to button dobara dabayen.`
+          : `Filter records ka last batch load ho gaya — ${addedGroups.toLocaleString()} new folder(s).`,
+      );
     } catch (loadError) {
       setError(
         loadError instanceof Error
@@ -334,6 +388,7 @@ export default function R2GalleryPage() {
           : "Filter records load failed",
       );
     } finally {
+      galleryRequestLockRef.current = false;
       setLoadingFilterRecords(false);
       setFilterLoadProgress("");
     }
@@ -1308,7 +1363,7 @@ export default function R2GalleryPage() {
         <div>
           <p className="text-sm font-black text-blue-950">Load Selected Filter Records</p>
           <p className="mt-1 text-xs font-bold text-blue-700">
-            Upar filter select karein, phir button dabayen. Gallery baqi records check karke selected filter ke matching records show karegi.
+            Upar filter select karein, phir button dabayen. Har click sirf next batch load karega — maximum 1,000 folders. Automatic full-bucket loading nahi hogi.
           </p>
         </div>
 
@@ -1340,7 +1395,7 @@ export default function R2GalleryPage() {
           {loadingFilterRecords
             ? filterLoadProgress || "Loading filter records..."
             : hasMore
-              ? "Load Filter Records"
+              ? "Load Next Filter Batch (Max 1,000)"
               : "All Records Loaded"}
         </button>
       </div>
@@ -1577,11 +1632,11 @@ export default function R2GalleryPage() {
           <button
             type="button"
             onClick={() => void loadGallery(nextCursor)}
-            disabled={loadingMore || !nextCursor}
+            disabled={loadingMore || loadingFilterRecords || !nextCursor}
             className="inline-flex h-12 items-center justify-center gap-2 rounded-2xl bg-emerald-700 px-6 text-sm font-black text-white shadow-sm transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {loadingMore && <Loader2 className="h-4 w-4 animate-spin" />}
-            {loadingMore ? "Loading more..." : "Load More Products"}
+            {loadingMore ? "Loading next batch..." : "Load Next Batch (Max 1,000)"}
           </button>
         </div>
       )}
