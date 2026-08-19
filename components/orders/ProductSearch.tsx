@@ -263,7 +263,9 @@ export default function ProductSearch({
 
       try {
         const res = await fetch(
-          `/api/products?search=${encodeURIComponent(value)}&pageSize=10`,
+          `/api/products?search=${encodeURIComponent(value)}&pageSize=10${
+            enableStockValidation ? "&stockOnly=1" : ""
+          }`,
         );
         const data = await res.json();
 
@@ -290,7 +292,7 @@ export default function ProductSearch({
     }, 400);
 
     return () => clearTimeout(timer);
-  }, [query, selectedProduct]);
+  }, [query, selectedProduct, enableStockValidation]);
 
   function getAvailableStock(product: Product | null) {
     return Math.max(0, Number(product?.stock) || 0);
