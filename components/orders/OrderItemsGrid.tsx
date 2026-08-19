@@ -1,6 +1,6 @@
 "use client";
 
-import { ImageIcon, Trash2 } from "lucide-react";
+import { ImageIcon, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 export type OrderItem = {
@@ -38,6 +38,7 @@ export default function OrderItemsGrid({
   const [supplierOptions, setSupplierOptions] = useState<string[]>([]);
   const [selectedBaseName, setSelectedBaseName] = useState("");
   const [loadingSuppliers, setLoadingSuppliers] = useState(false);
+  const [previewImage, setPreviewImage] = useState<{ src: string; sku: string } | null>(null);
 
   useEffect(() => {
     async function loadSelectedBase() {
@@ -90,6 +91,19 @@ export default function OrderItemsGrid({
       mounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!previewImage) return;
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setPreviewImage(null);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [previewImage]);
 
   const subtotal = useMemo(() => {
     return items.reduce((total, item) => total + getOrderItemTotal(item), 0);
@@ -231,11 +245,21 @@ export default function OrderItemsGrid({
                 <tr key={item.id} className="border-t border-slate-100">
                   <td className="px-4 py-3">
                     {item.image ? (
-                      <img
-                        src={item.image}
-                        alt={item.sku}
-                        className="h-16 w-12 rounded-xl bg-slate-50 object-contain ring-1 ring-slate-200"
-                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPreviewImage({ src: item.image, sku: item.sku })
+                        }
+                        className="group relative block rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        title="Click to enlarge image"
+                        aria-label={`Enlarge image for ${item.sku}`}
+                      >
+                        <img
+                          src={item.image}
+                          alt={item.sku}
+                          className="h-16 w-12 cursor-zoom-in rounded-xl bg-slate-50 object-contain ring-1 ring-slate-200 transition group-hover:opacity-90"
+                        />
+                      </button>
                     ) : (
                       <div className="grid h-16 w-12 place-items-center rounded-xl bg-slate-100 text-slate-400 ring-1 ring-slate-200">
                         <ImageIcon size={18} />
@@ -371,6 +395,41 @@ export default function OrderItemsGrid({
           </tbody>
         </table>
       </div>
+
+      {previewImage && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4"
+          onClick={() => setPreviewImage(null)}
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Image preview for ${previewImage.sku}`}
+        >
+          <div
+            className="relative max-h-[92vh] max-w-[92vw] rounded-2xl bg-white p-3 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setPreviewImage(null)}
+              className="absolute right-3 top-3 z-10 grid h-10 w-10 place-items-center rounded-full bg-black/70 text-white transition hover:bg-black"
+              title="Close preview"
+              aria-label="Close image preview"
+            >
+              <X size={20} />
+            </button>
+
+            <img
+              src={previewImage.src}
+              alt={previewImage.sku}
+              className="max-h-[85vh] max-w-[86vw] rounded-xl object-contain"
+            />
+
+            <p className="px-2 pb-1 pt-3 text-center text-sm font-black text-slate-800">
+              {previewImage.sku}
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
