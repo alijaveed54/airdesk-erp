@@ -63,6 +63,96 @@ function lowerValue(value: any): string {
   return textValue(value).trim().toLowerCase();
 }
 
+function escapeAirtableFormulaText(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function fieldTextExpression(field: SchemaField | undefined, fieldName: string) {
+  const arrayLikeTypes = new Set([
+    "multipleRecordLinks",
+    "multipleLookupValues",
+    "multipleSelects",
+    "rollup",
+  ]);
+
+  if (field && arrayLikeTypes.has(String(field.type || ""))) {
+    return `ARRAYJOIN({${fieldName}}&"")`;
+  }
+
+  return `({${fieldName}}&"")`;
+}
+
+function containsFieldFormula(
+  fields: SchemaField[],
+  fieldName: string,
+  value: string
+) {
+  const field = fields.find((item) => item.name === fieldName);
+  const expression = fieldTextExpression(field, fieldName);
+  const escapedValue = escapeAirtableFormulaText(value);
+
+  return `FIND(LOWER("${escapedValue}"),LOWER(${expression}))>0`;
+}
+
+function equalsFieldFormula(
+  fields: SchemaField[],
+  fieldName: string,
+  value: string
+) {
+  const field = fields.find((item) => item.name === fieldName);
+  const expression = fieldTextExpression(field, fieldName);
+  const escapedValue = escapeAirtableFormulaText(value);
+
+  return `LOWER(TRIM(${expression}))=LOWER("${escapedValue}")`;
+}
+
+function normalizePhoneDigits(value: unknown) {
+  return String(value ?? "").replace(/\D/g, "");
+}
+
+function phoneMatches(value: unknown, searchValue: string) {
+  const rawValue = String(value ?? "").trim().toLowerCase();
+  const rawSearch = String(searchValue ?? "").trim().toLowerCase();
+
+  if (!rawSearch) return true;
+  if (rawValue.includes(rawSearch)) return true;
+
+  const valueDigits = normalizePhoneDigits(rawValue);
+  const searchDigits = normalizePhoneDigits(rawSearch);
+
+  if (!searchDigits) return false;
+  if (valueDigits.includes(searchDigits)) return true;
+
+  // Local vs international formats, e.g. 0300... vs +92300...
+  const suffixLength = Math.min(10, valueDigits.length, searchDigits.length);
+  return (
+    suffixLength >= 7 &&
+    valueDigits.slice(-suffixLength) === searchDigits.slice(-suffixLength)
+  );
+}
+
+function phoneFieldFormula(
+  fields: SchemaField[],
+  fieldName: string,
+  value: string
+) {
+  const field = fields.find((item) => item.name === fieldName);
+  const expression = fieldTextExpression(field, fieldName);
+  const digits = normalizePhoneDigits(value);
+
+  if (!digits) {
+    return containsFieldFormula(fields, fieldName, value);
+  }
+
+  const normalizedExpression =
+    `SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(` +
+    `${expression}," ",""),"+",""),"-",""),"(",""),")",""),".","")`;
+
+  // Compare the last up-to-10 digits so +92xxxxxxxxxx and 0xxxxxxxxxx can match.
+  const searchSuffix = digits.slice(-Math.min(10, digits.length));
+  return `FIND("${escapeAirtableFormulaText(searchSuffix)}",RIGHT(${normalizedExpression},10))>0`;
+}
+
 function numberValue(value: any): number {
   const parsed = Number(firstValue(value));
   return Number.isFinite(parsed) ? parsed : 0;
@@ -213,10 +303,17 @@ function buildFieldMap(orderEntryTable: SchemaTable): FieldMap {
       "Contact Bak",
     ]),
     customerNumber: getFieldName(fields, [
+      "Telephone1",
+      "Telephone 1",
+      "Customer Mobile",
       "Mobile Number",
       "Contact no.",
       "Contact No.",
       "Contact No",
+      "Contact Number",
+      "ConsigneeTel1",
+      "Consignee Mobile No 1",
+      "ConsigneeMob1",
       "Contact",
       "Phone",
       "Mobile",
@@ -246,17 +343,18 @@ function buildFieldMap(orderEntryTable: SchemaTable): FieldMap {
       "Order Status",
       "Status",
     ]),
+    // Keep Item Code and SKU separate. In BS Order Entry both can exist,
+    // but SKU is the product relationship / primary product identifier.
     itemCode: getFieldName(fields, [
       "Item Code",
-      "SKU",
-      "sku",
-      "Product SKU",
+      "item code",
+      "Product Code",
     ]),
     sku: getFieldName(fields, [
       "SKU",
       "sku",
-      "Item Code",
       "Product SKU",
+      "Product",
     ]),
     quantity: getFieldName(fields, [
       "quantity",
@@ -305,21 +403,599 @@ function buildFieldMap(orderEntryTable: SchemaTable): FieldMap {
   };
 }
 
+function findCustomerLinkField(
+  orderEntryTable: SchemaTable,
+  schema: SchemaTable[]
+) {
+  const fields = orderEntryTable.fields || [];
+
+  return (
+    fields.find((field) => {
+      if (
+        field.type !== "multipleRecordLinks" ||
+        !field.options?.linkedTableId
+      ) {
+        return false;
+      }
+
+      const linkedTable = schema.find(
+        (table) => table.id === field.options?.linkedTableId
+      );
+      const linkedName = String(linkedTable?.name || "")
+        .trim()
+        .toLowerCase();
+
+      return linkedName === "customer" || linkedName.includes("customer");
+    }) ||
+    fields.find((field) => {
+      if (
+        field.type !== "multipleRecordLinks" ||
+        !field.options?.linkedTableId
+      ) {
+        return false;
+      }
+
+      const name = field.name.trim().toLowerCase();
+      return ["contact bak", "contact no.", "contact no", "customer", "contact"].includes(name);
+    })
+  );
+}
+
+async function loadLinkedCustomerDetails({
+  baseId,
+  token,
+  linkedTable,
+  recordIds,
+}: {
+  baseId: string;
+  token: string;
+  linkedTable: SchemaTable;
+  recordIds: string[];
+}) {
+  const uniqueIds = Array.from(
+    new Set(recordIds.filter((id) => String(id || "").startsWith("rec")))
+  );
+  const values = new Map<string, { name: string; phone: string }>();
+
+  if (uniqueIds.length === 0) return values;
+
+  const customerNameField = getFieldName(linkedTable.fields || [], [
+    "Customer Name",
+    "Name",
+    "Consignee",
+    "Full Name",
+  ]);
+  const customerPhoneField = getFieldName(linkedTable.fields || [], [
+    "Contact No.",
+    "Contact No",
+    "Contact",
+    "Mobile Number",
+    "Mobile No.",
+    "Mobile No",
+    "Phone",
+    "Mobile",
+    "Telephone1",
+  ]);
+
+  const primaryField =
+    linkedTable.fields.find((field) => field.id === linkedTable.primaryFieldId)?.name ||
+    linkedTable.fields[0]?.name ||
+    "";
+
+  for (let index = 0; index < uniqueIds.length; index += 40) {
+    const batch = uniqueIds.slice(index, index + 40);
+    const formula =
+      batch.length === 1
+        ? `RECORD_ID()='${batch[0]}'`
+        : `OR(${batch.map((id) => `RECORD_ID()='${id}'`).join(",")})`;
+
+    const params = new URLSearchParams({
+      pageSize: "100",
+      filterByFormula: formula,
+    });
+
+    const response = await fetch(
+      airtableUrl(baseId, linkedTable.name, params),
+      {
+        headers: airtableHeaders(token),
+        cache: "no-store",
+      }
+    );
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data?.error?.message ||
+          data?.error?.error?.message ||
+          `Unable to resolve customers from ${linkedTable.name}`
+      );
+    }
+
+    for (const record of data.records || []) {
+      const primaryValue = primaryField
+        ? textValue(record.fields?.[primaryField])
+        : "";
+      const name = customerNameField
+        ? textValue(record.fields?.[customerNameField])
+        : "";
+      const phone = customerPhoneField
+        ? textValue(record.fields?.[customerPhoneField])
+        : "";
+
+      values.set(record.id, {
+        name: name || (!phone ? primaryValue : ""),
+        phone: phone || (/\d{7,}/.test(normalizePhoneDigits(primaryValue)) ? primaryValue : ""),
+      });
+    }
+  }
+
+  return values;
+}
+
+
+function findCustomerLinkFieldInTable(
+  table: SchemaTable,
+  schema: SchemaTable[]
+) {
+  return (
+    table.fields.find((field) => {
+      if (
+        field.type !== "multipleRecordLinks" ||
+        !field.options?.linkedTableId
+      ) {
+        return false;
+      }
+
+      const linkedTable = schema.find(
+        (item) => item.id === field.options?.linkedTableId
+      );
+      const linkedName = String(linkedTable?.name || "")
+        .trim()
+        .toLowerCase();
+
+      return linkedName === "customer" || linkedName.includes("customer");
+    }) ||
+    table.fields.find((field) => {
+      if (
+        field.type !== "multipleRecordLinks" ||
+        !field.options?.linkedTableId
+      ) {
+        return false;
+      }
+
+      const normalizedName = field.name.trim().toLowerCase();
+      return [
+        "customer",
+        "contact",
+        "contact no.",
+        "contact no",
+        "contact bak",
+      ].includes(normalizedName);
+    })
+  );
+}
+
+async function loadInvoiceCustomerDetails({
+  baseId,
+  token,
+  invoiceTable,
+  schema,
+  invoiceIds,
+}: {
+  baseId: string;
+  token: string;
+  invoiceTable: SchemaTable;
+  schema: SchemaTable[];
+  invoiceIds: string[];
+}) {
+  const uniqueIds = Array.from(
+    new Set(invoiceIds.filter((id) => String(id || "").startsWith("rec")))
+  );
+
+  const result = new Map<string, { name: string; phone: string }>();
+  if (uniqueIds.length === 0) return result;
+
+  const invoiceCustomerNameField = getFieldName(invoiceTable.fields || [], [
+    "Consignee",
+    "Customer Name",
+    "Customer Name (from Contact No. )",
+    "Name (from Contact No.)",
+    "Contact Name",
+    "Consignee Name",
+    "Name",
+  ]);
+
+  const invoicePhoneField = getFieldName(invoiceTable.fields || [], [
+    "Telephone1",
+    "Telephone 1",
+    "Customer Mobile",
+    "Mobile Number",
+    "Contact no.",
+    "Contact No.",
+    "Contact No",
+    "Contact Number",
+    "ConsigneeTel1",
+    "Consignee Mobile No 1",
+    "ConsigneeMob1",
+    "Phone",
+    "Mobile",
+  ]);
+
+  const customerLinkField = findCustomerLinkFieldInTable(invoiceTable, schema);
+  const invoiceToCustomerId = new Map<string, string>();
+  const customerIds: string[] = [];
+
+  for (let index = 0; index < uniqueIds.length; index += 40) {
+    const batch = uniqueIds.slice(index, index + 40);
+    const formula =
+      batch.length === 1
+        ? `RECORD_ID()='${batch[0]}'`
+        : `OR(${batch.map((id) => `RECORD_ID()='${id}'`).join(",")})`;
+
+    const params = new URLSearchParams({
+      pageSize: "100",
+      filterByFormula: formula,
+    });
+
+    const requestedFields = Array.from(
+      new Set(
+        [
+          invoiceCustomerNameField,
+          invoicePhoneField,
+          customerLinkField?.name || "",
+        ].filter(Boolean)
+      )
+    );
+
+    requestedFields.forEach((fieldName) =>
+      params.append("fields[]", fieldName)
+    );
+
+    const response = await fetch(
+      airtableUrl(baseId, invoiceTable.name, params),
+      {
+        headers: airtableHeaders(token),
+        cache: "no-store",
+      }
+    );
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data?.error?.message ||
+          data?.error?.error?.message ||
+          `Unable to resolve invoice customer details from ${invoiceTable.name}`
+      );
+    }
+
+    for (const record of data.records || []) {
+      const fields = record.fields || {};
+      const directName = invoiceCustomerNameField
+        ? textValue(fields[invoiceCustomerNameField])
+        : "";
+      const directPhone = invoicePhoneField
+        ? textValue(fields[invoicePhoneField])
+        : "";
+
+      result.set(record.id, {
+        name:
+          directName && !directName.startsWith("rec")
+            ? directName
+            : "",
+        phone:
+          directPhone && !directPhone.startsWith("rec")
+            ? directPhone
+            : "",
+      });
+
+      if (customerLinkField) {
+        const rawCustomer = fields[customerLinkField.name];
+        const customerId = Array.isArray(rawCustomer)
+          ? String(rawCustomer[0] || "")
+          : String(rawCustomer || "");
+
+        if (customerId.startsWith("rec")) {
+          invoiceToCustomerId.set(record.id, customerId);
+          customerIds.push(customerId);
+        }
+      }
+    }
+  }
+
+  if (
+    customerLinkField?.options?.linkedTableId &&
+    customerIds.length > 0
+  ) {
+    const customerTable = schema.find(
+      (table) => table.id === customerLinkField.options?.linkedTableId
+    );
+
+    if (customerTable) {
+      const customerDetails = await loadLinkedCustomerDetails({
+        baseId,
+        token,
+        linkedTable: customerTable,
+        recordIds: customerIds,
+      });
+
+      for (const [invoiceId, customerId] of invoiceToCustomerId) {
+        const current = result.get(invoiceId) || { name: "", phone: "" };
+        const linked = customerDetails.get(customerId);
+
+        result.set(invoiceId, {
+          name: current.name || linked?.name || "",
+          phone: current.phone || linked?.phone || "",
+        });
+      }
+    }
+  }
+
+  return result;
+}
+
+async function findInvoiceOrderLabelsByPhone({
+  baseId,
+  token,
+  orderEntryTable,
+  schema,
+  fieldMap,
+  phone,
+}: {
+  baseId: string;
+  token: string;
+  orderEntryTable: SchemaTable;
+  schema: SchemaTable[];
+  fieldMap: FieldMap;
+  phone: string;
+}): Promise<string[] | null> {
+  const orderFieldName = fieldMap.orderNo || fieldMap.orderLink;
+  if (!orderFieldName) return null;
+
+  const orderField = orderEntryTable.fields.find(
+    (field) => field.name === orderFieldName
+  );
+
+  if (
+    orderField?.type !== "multipleRecordLinks" ||
+    !orderField.options?.linkedTableId
+  ) {
+    return null;
+  }
+
+  const invoiceTable = schema.find(
+    (table) => table.id === orderField.options?.linkedTableId
+  );
+  if (!invoiceTable) return null;
+
+  const invoiceFields = invoiceTable.fields || [];
+  const primaryField =
+    invoiceTable.fields.find(
+      (field) => field.id === invoiceTable.primaryFieldId
+    )?.name ||
+    invoiceTable.fields[0]?.name ||
+    "";
+
+  const invoiceOrderNoField =
+    getFieldName(invoiceFields, [
+      "Order No.",
+      "Order No",
+      "order_no.",
+      "Order Number",
+      "Invoice No.",
+      "Invoice No",
+      "Invoice Number",
+      "Number",
+    ]) || primaryField;
+
+  if (!invoiceOrderNoField) return null;
+
+  const invoicePhoneField = getFieldName(invoiceFields, [
+    "Telephone1",
+    "Telephone 1",
+    "Customer Mobile",
+    "Mobile Number",
+    "Contact no.",
+    "Contact No.",
+    "Contact No",
+    "Contact Number",
+    "ConsigneeTel1",
+    "Consignee Mobile No 1",
+    "ConsigneeMob1",
+    "Phone",
+    "Mobile",
+  ]);
+
+  let invoiceFilterFormula = "";
+
+  if (invoicePhoneField) {
+    const invoicePhoneSchemaField = invoiceFields.find(
+      (field) => field.name === invoicePhoneField
+    );
+
+    // A lookup/text phone field can be searched directly on the invoice.
+    // If the field itself is a linked record, resolve through the Customer table.
+    if (invoicePhoneSchemaField?.type !== "multipleRecordLinks") {
+      invoiceFilterFormula = phoneFieldFormula(
+        invoiceFields,
+        invoicePhoneField,
+        phone
+      );
+    }
+  }
+
+  if (!invoiceFilterFormula) {
+    const customerLinkField = findCustomerLinkFieldInTable(
+      invoiceTable,
+      schema
+    );
+
+    if (
+      !customerLinkField?.options?.linkedTableId
+    ) {
+      return null;
+    }
+
+    const customerTable = schema.find(
+      (table) => table.id === customerLinkField.options?.linkedTableId
+    );
+    if (!customerTable) return null;
+
+    const customerPhoneField = getFieldName(customerTable.fields || [], [
+      "Contact No.",
+      "Contact No",
+      "Contact",
+      "Mobile Number",
+      "Mobile No.",
+      "Mobile No",
+      "Telephone1",
+      "Phone",
+      "Mobile",
+    ]);
+
+    if (!customerPhoneField) return null;
+
+    const customerParams = new URLSearchParams({
+      pageSize: "100",
+      filterByFormula: phoneFieldFormula(
+        customerTable.fields,
+        customerPhoneField,
+        phone
+      ),
+    });
+
+    const customerPrimary =
+      customerTable.fields.find(
+        (field) => field.id === customerTable.primaryFieldId
+      )?.name ||
+      customerTable.fields[0]?.name ||
+      "";
+
+    if (!customerPrimary) return null;
+
+    customerParams.append("fields[]", customerPrimary);
+
+    const matchedCustomerLabels: string[] = [];
+    let customerOffset = "";
+
+    do {
+      if (customerOffset) customerParams.set("offset", customerOffset);
+      else customerParams.delete("offset");
+
+      const response = await fetch(
+        airtableUrl(baseId, customerTable.name, customerParams),
+        {
+          headers: airtableHeaders(token),
+          cache: "no-store",
+        }
+      );
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data?.error?.message ||
+            data?.error?.error?.message ||
+            `Unable to search customers in ${customerTable.name}`
+        );
+      }
+
+      for (const record of data.records || []) {
+        const label = textValue(record.fields?.[customerPrimary]);
+        if (label) matchedCustomerLabels.push(label);
+      }
+
+      customerOffset = data.offset || "";
+    } while (customerOffset);
+
+    const uniqueCustomerLabels = Array.from(
+      new Set(matchedCustomerLabels.filter(Boolean))
+    );
+
+    if (uniqueCustomerLabels.length === 0) return [];
+
+    const customerLinkFormulas = uniqueCustomerLabels
+      .slice(0, 50)
+      .map((label) =>
+        containsFieldFormula(
+          invoiceFields,
+          customerLinkField.name,
+          label
+        )
+      );
+
+    invoiceFilterFormula =
+      customerLinkFormulas.length === 1
+        ? customerLinkFormulas[0]
+        : `OR(${customerLinkFormulas.join(",")})`;
+  }
+
+  const orderLabels: string[] = [];
+  let invoiceOffset = "";
+
+  do {
+    const params = new URLSearchParams({
+      pageSize: "100",
+      filterByFormula: invoiceFilterFormula,
+    });
+
+    params.append("fields[]", invoiceOrderNoField);
+    if (invoiceOffset) params.set("offset", invoiceOffset);
+
+    const response = await fetch(
+      airtableUrl(baseId, invoiceTable.name, params),
+      {
+        headers: airtableHeaders(token),
+        cache: "no-store",
+      }
+    );
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data?.error?.message ||
+          data?.error?.error?.message ||
+          `Unable to search contact number in ${invoiceTable.name}`
+      );
+    }
+
+    for (const record of data.records || []) {
+      const label = textValue(record.fields?.[invoiceOrderNoField]);
+      if (label) orderLabels.push(label);
+    }
+
+    invoiceOffset = data.offset || "";
+  } while (invoiceOffset);
+
+  return Array.from(new Set(orderLabels.filter(Boolean)));
+}
+
 function normalizeRecord(
   record: any,
   map: FieldMap,
-  linkedSkuNames: Map<string, string>
+  linkedSkuNames: Map<string, string>,
+  linkedOrderNames: Map<string, string>,
+  linkedCustomers: Map<string, { name: string; phone: string }>,
+  customerLinkFieldName: string,
+  linkedInvoiceCustomers: Map<string, { name: string; phone: string }>
 ) {
   const fields = record.fields || {};
 
+  const rawOrderValue =
+    fields[map.orderNo] ??
+    fields[map.orderLink] ??
+    "";
+
+  const rawOrderId = Array.isArray(rawOrderValue)
+    ? String(rawOrderValue[0] || "")
+    : String(rawOrderValue || "");
+
   const orderNo =
-    textValue(fields[map.orderNo]) ||
-    textValue(fields[map.orderLink]) ||
+    linkedOrderNames.get(rawOrderId) ||
+    textValue(rawOrderValue) ||
     "Unknown";
 
   const rawItemValue =
-    fields[map.itemCode] ??
     fields[map.sku] ??
+    fields[map.itemCode] ??
     "";
 
   const rawLinkedId = Array.isArray(rawItemValue)
@@ -331,12 +1007,34 @@ function normalizeRecord(
     textValue(rawItemValue) ||
     "";
 
+  const rawCustomerLink = customerLinkFieldName
+    ? fields[customerLinkFieldName]
+    : "";
+  const customerRecordId = Array.isArray(rawCustomerLink)
+    ? String(rawCustomerLink[0] || "")
+    : String(rawCustomerLink || "");
+  const linkedCustomer = linkedCustomers.get(customerRecordId);
+  const invoiceCustomer = linkedInvoiceCustomers.get(rawOrderId);
+
+  const directCustomer = textValue(fields[map.customer]);
+  const directPhone = textValue(fields[map.customerNumber]);
+  const resolvedCustomer =
+    (directCustomer && !directCustomer.startsWith("rec") ? directCustomer : "") ||
+    invoiceCustomer?.name ||
+    linkedCustomer?.name ||
+    "";
+  const resolvedPhone =
+    invoiceCustomer?.phone ||
+    (directPhone && !directPhone.startsWith("rec") ? directPhone : "") ||
+    linkedCustomer?.phone ||
+    "";
+
   const normalizedFields = {
     ...fields,
     "Order Number": orderNo ? [orderNo] : [],
     "Item Code": resolvedItemCode,
-    Customer: textValue(fields[map.customer]) || "",
-    "Mobile Number": textValue(fields[map.customerNumber]) || "",
+    Customer: resolvedCustomer,
+    "Mobile Number": resolvedPhone,
     "created Date": textValue(fields[map.createdDate]) || "",
     date: textValue(fields[map.date]) || "",
     Store: textValue(fields[map.store]) || "",
@@ -675,7 +1373,7 @@ async function loadI5qDqGroupedOrders({
 
       if (
         customerFilter &&
-        !customerPhone.toLowerCase().includes(customerFilter)
+        !phoneMatches(customerPhone, customerFilter)
       ) {
         continue;
       }
@@ -893,34 +1591,117 @@ export async function GET(req: NextRequest) {
       orderStatus ||
       storeName;
 
-    const maxRecords = latest && !hasFilters ? 300 : 2000;
+    const contactOrderLabels = customerNumber
+      ? await findInvoiceOrderLabelsByPhone({
+          baseId: airtable.baseId,
+          token: airtable.token,
+          orderEntryTable,
+          schema,
+          fieldMap,
+          phone: customerNumber,
+        })
+      : null;
 
-    let offset = "";
+    if (
+      customerNumber &&
+      Array.isArray(contactOrderLabels) &&
+      contactOrderLabels.length === 0
+    ) {
+      return NextResponse.json({
+        success: true,
+        baseName: airtable.baseName,
+        tableName: orderEntryTableName,
+        orders: [],
+      });
+    }
+
+    const maxRecords = latest && !hasFilters
+      ? 300
+      : customerNumber && contactOrderLabels === null
+        ? 10000
+        : 5000;
+
+    const contactLabelBatches =
+      Array.isArray(contactOrderLabels) && contactOrderLabels.length > 0
+        ? Array.from(
+            { length: Math.ceil(contactOrderLabels.length / 20) },
+            (_, index) => contactOrderLabels.slice(index * 20, index * 20 + 20)
+          )
+        : [null];
+
     let allRecords: any[] = [];
 
-    do {
-      const params = new URLSearchParams({
-        pageSize: "100",
-      });
+    for (const contactLabelBatch of contactLabelBatches) {
+      let offset = "";
 
-      // Server-side filtering to reduce CPU and Airtable payload.
+      do {
+        const params = new URLSearchParams({
+          pageSize: "100",
+        });
+
+      // Server-side filtering to reduce Airtable payload.
+      // Use field-type-aware text expressions so linked/lookup fields work
+      // the same way as normal text/select fields.
       const formulaParts: string[] = [];
 
-      if (orderNo && fieldMap.orderNo) {
+      const orderSearchField = fieldMap.orderNo || fieldMap.orderLink;
+
+      if (orderNo && orderSearchField) {
         formulaParts.push(
-          `SEARCH("${orderNo.replace(/"/g, "\\\"")}", {${fieldMap.orderNo}})`
+          containsFieldFormula(orderEntryTable.fields, orderSearchField, orderNo)
         );
       }
 
-      if (sku && fieldMap.itemCode) {
+      // Contact Number is header/customer data. When invoice-side phone lookup
+      // succeeds, restrict Order Entry rows by the matching invoice Order No(s).
+      if (contactLabelBatch && orderSearchField) {
+        const contactOrderFormulas = contactLabelBatch.map((label) =>
+          equalsFieldFormula(
+            orderEntryTable.fields,
+            orderSearchField,
+            label
+          )
+        );
+
         formulaParts.push(
-          `SEARCH("${sku.replace(/"/g, "\\\"")}", {${fieldMap.itemCode}})`
+          contactOrderFormulas.length === 1
+            ? contactOrderFormulas[0]
+            : `OR(${contactOrderFormulas.join(",")})`
         );
       }
 
-      if (customerNumber && fieldMap.customerNumber) {
+      // SKU search must target the actual SKU/product-link field first.
+      // Item Code is only a fallback for bases that do not expose a SKU field.
+      const skuSearchField = fieldMap.sku || fieldMap.itemCode;
+      if (sku && skuSearchField) {
         formulaParts.push(
-          `SEARCH("${customerNumber.replace(/"/g, "\\\"")}", {${fieldMap.customerNumber}})`
+          containsFieldFormula(orderEntryTable.fields, skuSearchField, sku)
+        );
+      }
+
+      if (customerName && fieldMap.customer) {
+        formulaParts.push(
+          containsFieldFormula(
+            orderEntryTable.fields,
+            fieldMap.customer,
+            customerName
+          )
+        );
+      }
+
+      if (orderStatus && fieldMap.orderStatus) {
+        formulaParts.push(
+          equalsFieldFormula(
+            orderEntryTable.fields,
+            fieldMap.orderStatus,
+            orderStatus
+          )
+        );
+      }
+
+      if (storeName && fieldMap.store) {
+        formulaParts.push(
+          equalsFieldFormula(orderEntryTable.fields, fieldMap.store, storeName)
         );
       }
 
@@ -991,17 +1772,108 @@ export async function GET(req: NextRequest) {
         );
       }
 
-      allRecords.push(...(data.records || []));
-      offset = data.offset || "";
+        allRecords.push(...(data.records || []));
+        offset = data.offset || "";
 
-      if (allRecords.length >= maxRecords) {
-        offset = "";
+        if (allRecords.length >= maxRecords) {
+          offset = "";
+        }
+      } while (offset);
+
+      if (allRecords.length >= maxRecords) break;
+    }
+
+    allRecords = Array.from(
+      new Map(
+        allRecords
+          .filter((record) => record?.id)
+          .map((record) => [String(record.id), record])
+      ).values()
+    ).slice(0, maxRecords);
+
+    const orderFieldName = fieldMap.orderNo || fieldMap.orderLink;
+    const orderSchemaField = orderEntryTable.fields.find(
+      (field) => field.name === orderFieldName
+    );
+
+    let linkedOrderNames = new Map<string, string>();
+
+    if (
+      orderSchemaField?.type === "multipleRecordLinks" &&
+      orderSchemaField.options?.linkedTableId
+    ) {
+      const linkedOrderTable = schema.find(
+        (table) => table.id === orderSchemaField.options?.linkedTableId
+      );
+
+      if (linkedOrderTable) {
+        const linkedOrderIds: string[] = [];
+
+        for (const record of allRecords) {
+          const rawValue = record.fields?.[orderFieldName];
+
+          if (Array.isArray(rawValue)) {
+            for (const id of rawValue) {
+              if (typeof id === "string") linkedOrderIds.push(id);
+            }
+          } else if (typeof rawValue === "string") {
+            linkedOrderIds.push(rawValue);
+          }
+        }
+
+        linkedOrderNames = await loadLinkedRecordNames({
+          baseId: airtable.baseId,
+          token: airtable.token,
+          linkedTable: linkedOrderTable,
+          recordIds: linkedOrderIds,
+        });
       }
-    } while (offset);
+    }
 
-    allRecords = allRecords.slice(0, maxRecords);
+    let linkedInvoiceCustomers = new Map<
+      string,
+      { name: string; phone: string }
+    >();
 
-    const skuFieldName = fieldMap.itemCode || fieldMap.sku;
+    if (
+      orderSchemaField?.type === "multipleRecordLinks" &&
+      orderSchemaField.options?.linkedTableId
+    ) {
+      const linkedInvoiceTable = schema.find(
+        (table) => table.id === orderSchemaField.options?.linkedTableId
+      );
+
+      if (linkedInvoiceTable) {
+        const invoiceIds: string[] = [];
+
+        for (const record of allRecords) {
+          const rawValue = record.fields?.[orderFieldName];
+
+          if (Array.isArray(rawValue)) {
+            for (const id of rawValue) {
+              if (typeof id === "string" && id.startsWith("rec")) {
+                invoiceIds.push(id);
+              }
+            }
+          } else if (
+            typeof rawValue === "string" &&
+            rawValue.startsWith("rec")
+          ) {
+            invoiceIds.push(rawValue);
+          }
+        }
+
+        linkedInvoiceCustomers = await loadInvoiceCustomerDetails({
+          baseId: airtable.baseId,
+          token: airtable.token,
+          invoiceTable: linkedInvoiceTable,
+          schema,
+          invoiceIds,
+        });
+      }
+    }
+
+    const skuFieldName = fieldMap.sku || fieldMap.itemCode;
     const skuSchemaField = orderEntryTable.fields.find(
       (field) => field.name === skuFieldName
     );
@@ -1040,8 +1912,47 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    const customerLinkField = findCustomerLinkField(orderEntryTable, schema);
+    let linkedCustomers = new Map<string, { name: string; phone: string }>();
+
+    if (customerLinkField?.options?.linkedTableId) {
+      const linkedCustomerTable = schema.find(
+        (table) => table.id === customerLinkField.options?.linkedTableId
+      );
+
+      if (linkedCustomerTable) {
+        const customerIds: string[] = [];
+
+        for (const record of allRecords) {
+          const rawValue = record.fields?.[customerLinkField.name];
+          if (Array.isArray(rawValue)) {
+            for (const id of rawValue) {
+              if (typeof id === "string") customerIds.push(id);
+            }
+          } else if (typeof rawValue === "string") {
+            customerIds.push(rawValue);
+          }
+        }
+
+        linkedCustomers = await loadLinkedCustomerDetails({
+          baseId: airtable.baseId,
+          token: airtable.token,
+          linkedTable: linkedCustomerTable,
+          recordIds: customerIds,
+        });
+      }
+    }
+
     allRecords = allRecords.map((record) =>
-      normalizeRecord(record, fieldMap, linkedSkuNames)
+      normalizeRecord(
+        record,
+        fieldMap,
+        linkedSkuNames,
+        linkedOrderNames,
+        linkedCustomers,
+        customerLinkField?.name || "",
+        linkedInvoiceCustomers
+      )
     );
 
     let matchingRecords = allRecords;
@@ -1062,7 +1973,7 @@ export async function GET(req: NextRequest) {
 
         if (orderNo && !recordOrder.includes(orderNo)) continue;
         if (sku && !item.includes(sku)) continue;
-        if (customerNumber && !mobile.includes(customerNumber)) continue;
+        if (customerNumber && !phoneMatches(mobile, customerNumber)) continue;
         if (customerName && !customer.includes(customerName)) continue;
         if (dateFrom && recordDate < dateFrom) continue;
         if (dateTo && recordDate > dateTo) continue;

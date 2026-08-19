@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import CustomerSearch from "@/components/orders/CustomerSearch";
 import InvoiceSection from "@/components/orders/InvoiceSection";
 import ProductSearch from "@/components/orders/ProductSearch";
@@ -62,7 +62,16 @@ const [orderSummary, setOrderSummary] = useState({
   orderNote: "",
 });
 const [savedOrder, setSavedOrder] = useState<any>(null);
+const [isSaving, setIsSaving] = useState(false);
+const saveInFlightRef = useRef(false);
+
 async function handleSaveOrder() {
+  // Prevent rapid double-click / repeated submit before React can re-render.
+  if (saveInFlightRef.current) return;
+
+  saveInFlightRef.current = true;
+  setIsSaving(true);
+
   try {
     const res = await fetch("/api/orders/create", {
       method: "POST",
@@ -102,6 +111,9 @@ async function handleSaveOrder() {
   } catch (err) {
     console.error(err);
     alert("Server Error");
+  } finally {
+    saveInFlightRef.current = false;
+    setIsSaving(false);
   }
 }
 function firstDisplayValue(value: any): string {
@@ -565,6 +577,7 @@ function printInvoice() {
   summary={orderSummary}
   onSummaryChange={setOrderSummary}
   onSaveOrder={handleSaveOrder}
+  isSaving={isSaving}
   isI5qDqBase={isI5qDqBase(selectedBaseName)}
 />
       </div>

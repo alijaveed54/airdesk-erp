@@ -1,7 +1,7 @@
 "use client";
 
 import { Save } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import type { OrderItem } from "./OrderItemsGrid";
 
 type OrderSummaryData = {
@@ -18,6 +18,7 @@ type OrderSummaryProps = {
   summary: OrderSummaryData;
   onSummaryChange: (summary: OrderSummaryData) => void;
   onSaveOrder: () => void;
+  isSaving?: boolean;
   isI5qDqBase?: boolean;
 };
 
@@ -26,6 +27,7 @@ export default function OrderSummary({
   summary,
   onSummaryChange,
   onSaveOrder,
+  isSaving = false,
   isI5qDqBase = false,
 }: OrderSummaryProps) {
   const {
@@ -184,11 +186,13 @@ function updateSummary(updates: Partial<OrderSummaryData>) {
       </div>
 
       <button
-  onClick={onSaveOrder}
-  className="mt-6 inline-flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-emerald-600 to-blue-600 text-sm font-black text-white shadow-lg"
->
+        type="button"
+        onClick={onSaveOrder}
+        disabled={isSaving}
+        className="mt-6 inline-flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-emerald-600 to-blue-600 text-sm font-black text-white shadow-lg disabled:cursor-not-allowed disabled:opacity-60"
+      >
         <Save size={18} />
-        Save Order
+        {isSaving ? "Saving..." : "Save Order"}
       </button>
     </aside>
   );
