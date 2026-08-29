@@ -26,6 +26,7 @@ import {
   AlertTriangle,
   MessageCircle,
   Database,
+  Clock,
 } from "lucide-react";
 
 type Session = {
@@ -221,6 +222,12 @@ export default function Sidebar() {
       icon: Truck,
     },
     {
+  label: "Supplier Delayed",
+  href: "/reports/supplier-delayed",
+  icon: "Clock", // ya jo bhi icon system use ho raha hai
+},
+
+    {
       show: isAdmin || Boolean(permission?.canReports),
       href: "/reports",
       label: "Reports Home",
@@ -308,6 +315,14 @@ export default function Sidebar() {
       label: "Supplier Bill Dispatch",
       icon: ClipboardList,
     },
+    {
+  show:
+    !isEmployeeRole && session?.role !== "Supplier",
+  href: "/reports/supplier-delayed",
+  label: "Supplier Delayed",
+  icon: Clock,
+},
+
     {
       show:
         isAdmin ||

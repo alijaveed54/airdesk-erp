@@ -1,5 +1,8 @@
 "use client";
 
+import ProductBatchProductionClean from "./components/ProductBatchProductionClean";
+import ProductBatchController from "./components/ProductBatchController";
+
 import {
   AlertCircle,
   CalendarClock,
@@ -1839,6 +1842,10 @@ export default function FacebookBatchPage() {
             </div>
           </div>
         </header>
+
+        <ProductBatchProductionClean />
+
+        <ProductBatchController />
 
         {!workerConfigured && (
           <div className="flex items-start gap-3 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-amber-900">

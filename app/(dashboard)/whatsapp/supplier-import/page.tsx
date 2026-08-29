@@ -51,7 +51,6 @@ type ProductBlock = {
   timeText: string;
   timestamp: number | null;
   sender: string;
-  supplier: string;
   description: string;
   size: string;
   price: string;
@@ -61,6 +60,7 @@ type ProductBlock = {
   linkedMediaCount: number;
   sku: string;
   skuMessageIndex: number | null;
+  supplier: string;
   confidence: MappingConfidence;
   reviewed: boolean;
 };
@@ -109,29 +109,6 @@ type DirectoryPickerWindow = Window & {
     mode?: "read" | "readwrite";
   }) => Promise<DirectoryHandle>;
 };
-
-const DEFAULT_SUPPLIER_CODES = [
-  "HRT",
-  "FFT",
-  "SML",
-  "SRK",
-  "FEU",
-  "MAF",
-  "BS",
-  "DQ",
-  "UMZ",
-  "HT",
-];
-
-const DEFAULT_SKU_PREFIXES = [
-  "PMM",
-  "HRT",
-  "FFT",
-  "SML",
-  "SRK",
-  "UMZ",
-  "HT",
-];
 
 const PRODUCT_KEYWORDS = [
   "fabric",
@@ -186,7 +163,7 @@ const STRONG_PRODUCT_KEYWORDS = [
 
 const MEDIA_EXTENSIONS = /\.(jpe?g|png|webp|gif|heic|avif|mp4|mov|m4v|pdf)$/i;
 
-function normalizeList(value: string) {
+function normalizeList(value: string = "") {
   return Array.from(
     new Set(
       value
@@ -378,21 +355,6 @@ function looksLikeProductDescription(body: string) {
     (lineCount >= 5 && keywordHits >= 2 && normalized.length >= 120) ||
     hasPricedProductOffer
   );
-}
-
-function findSupplierCode(body: string, supplierCodes: string[]) {
-  const trimmed = body.trim();
-  if (!trimmed || trimmed.length > 80) return "";
-
-  for (const code of supplierCodes) {
-    const pattern = new RegExp(
-      `(^|[^A-Z0-9])${code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^A-Z0-9]|$)`,
-      "i",
-    );
-    if (pattern.test(trimmed)) return code;
-  }
-
-  return "";
 }
 
 type PricePair = {
@@ -654,25 +616,33 @@ function extractFabric(body: string) {
   return fallback ? cleanFabricCandidate(fallback[0]) : "";
 }
 
-function extractInternalSku(body: string, prefixes: string[]) {
+function extractInternalSku(body: string, _prefixes: string[]) {
   const cleaned = body
     .trim()
     .replace(/^sku\s*[:#\-]?\s*/i, "")
-    .replace(/\s+old\s+sku.*$/i, "")
-    .trim();
+    .toUpperCase()
+    .replace(/\s+/g, "");
 
-  if (!cleaned || cleaned.length > 60) return "";
-  if (/^(AED|QAR|MUR|INR|RS|PKR)\b/i.test(cleaned)) return "";
+  if (!cleaned || cleaned.length > 20) return "";
 
-  for (const prefix of prefixes) {
-    const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const pattern = new RegExp(
-      `^${escaped}[\s_-]*[0-9]{2,10}[A-Z0-9_-]*$`,
+  const allowedPrefixes = [
+    "PMM",
+    "HRT",
+    "FFT",
+    "SML",
+    "SRK",
+    "UMZ",
+    "HT",
+  ];
+
+  for (const prefix of allowedPrefixes) {
+    const regex = new RegExp(
+      `^${prefix}[0-9]{2,10}[A-Z0-9_-]*$`,
       "i",
     );
 
-    if (pattern.test(cleaned)) {
-      return cleaned.toUpperCase().replace(/\s+/g, "");
+    if (regex.test(cleaned)) {
+      return cleaned;
     }
   }
 
@@ -792,12 +762,6 @@ export default function WhatsAppSupplierImportPage() {
   const [error, setError] = useState("");
   const [senderStats, setSenderStats] = useState<SenderStat[]>([]);
   const [selectedMySenders, setSelectedMySenders] = useState<string[]>([]);
-  const [supplierCodesText, setSupplierCodesText] = useState(
-    DEFAULT_SUPPLIER_CODES.join(", "),
-  );
-  const [skuPrefixesText, setSkuPrefixesText] = useState(
-    DEFAULT_SKU_PREFIXES.join(", "),
-  );
   const [chatStartDate, setChatStartDate] = useState("");
   const [startAfterSku, setStartAfterSku] = useState("");
   const [products, setProducts] = useState<ProductBlock[]>([]);
@@ -812,7 +776,6 @@ export default function WhatsAppSupplierImportPage() {
   });
   const [mediaFilesCount, setMediaFilesCount] = useState(0);
   const [search, setSearch] = useState("");
-  const [supplierFilter, setSupplierFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [openProductDetails, setOpenProductDetails] = useState<
     Record<string, boolean>
@@ -821,35 +784,29 @@ export default function WhatsAppSupplierImportPage() {
     Record<string, boolean>
   >({});
 
-  const supplierCodes = useMemo(
-    () => normalizeList(supplierCodesText),
-    [supplierCodesText],
-  );
   const skuPrefixes = useMemo(
-    () => normalizeList(skuPrefixesText),
-    [skuPrefixesText],
-  );
-
-  const suppliers = useMemo(
-    () =>
-      Array.from(new Set(products.map((product) => product.supplier)))
-        .filter(Boolean)
-        .sort(),
-    [products],
+    () => [
+      "HRT",
+      "FFT",
+      "SML",
+      "SRK",
+      "UMZ",
+      "HT",
+      "PMM",
+    ],
+    [],
   );
 
   const filteredProducts = useMemo(() => {
     const query = search.trim().toLowerCase();
 
     return products.filter((product) => {
-      if (supplierFilter && product.supplier !== supplierFilter) return false;
       if (statusFilter && product.confidence !== statusFilter) return false;
 
       if (!query) return true;
 
       return [
         product.sku,
-        product.supplier,
         product.size,
         product.price,
         product.fabric,
@@ -860,7 +817,7 @@ export default function WhatsAppSupplierImportPage() {
         .toLowerCase()
         .includes(query);
     });
-  }, [products, search, supplierFilter, statusFilter]);
+  }, [products, search, statusFilter]);
 
   function setAllProductSections(isOpen: boolean) {
     const visibleProductIds = filteredProducts.map((product) => product.id);
@@ -1020,13 +977,11 @@ export default function WhatsAppSupplierImportPage() {
           sku: string;
         }> = [];
 
-        let activeSupplier = "UNASSIGNED";
-        let currentProduct: ProductBlock | null = null;
+              let currentProduct: ProductBlock | null = null;
         let pendingMediaRefs: MediaRef[] = [];
         let pendingMediaMessageCount = 0;
         let pendingFirstMessage: ChatMessage | null = null;
-        let pendingSupplier = "";
-        let pendingPrice = "";
+              let pendingPrice = "";
         let mediaMessages = 0;
         let exactMediaNames = 0;
 
@@ -1034,7 +989,6 @@ export default function WhatsAppSupplierImportPage() {
           pendingMediaRefs = [];
           pendingMediaMessageCount = 0;
           pendingFirstMessage = null;
-          pendingSupplier = "";
           pendingPrice = "";
         };
 
@@ -1046,7 +1000,8 @@ export default function WhatsAppSupplierImportPage() {
           const body = chatMessage.body.trim();
           if (!body || isDeletedOrSystem(body)) continue;
 
-          const internalSku = selectedSenderSet.has(chatMessage.sender)
+          const isShortSkuReply = body.length <= 25 && body.split("\n").length <= 2;
+          const internalSku = isShortSkuReply
             ? extractInternalSku(body, skuPrefixes)
             : "";
 
@@ -1067,18 +1022,14 @@ export default function WhatsAppSupplierImportPage() {
             continue;
           }
 
-          const supplierPairs = extractSupplierPricePairs(body, supplierCodes);
-          const supplierCode = findSupplierCode(body, supplierCodes);
-          const multipleSupplierPrices = supplierPairs.length > 1;
-          const supplierMarker = multipleSupplierPrices ? "" : supplierCode;
           const preferredSupplier =
             currentProduct?.supplier && currentProduct.supplier !== "UNASSIGNED"
               ? currentProduct.supplier
-              : pendingSupplier || activeSupplier;
+              : "";
           const detectedPrice = extractPrice(
             body,
             preferredSupplier,
-            supplierCodes,
+            [],
           );
           const mediaMessage = isMediaMessage(body);
 
@@ -1103,16 +1054,6 @@ export default function WhatsAppSupplierImportPage() {
             continue;
           }
 
-          if (supplierMarker) {
-            activeSupplier = supplierMarker;
-            if (currentProduct) {
-              currentProduct.supplier = supplierMarker;
-            } else {
-              rememberPendingStart(chatMessage);
-              pendingSupplier = supplierMarker;
-            }
-          }
-
           if (looksLikeProductDescription(body)) {
             const blockStart = pendingFirstMessage || chatMessage;
 
@@ -1124,10 +1065,6 @@ export default function WhatsAppSupplierImportPage() {
               timeText: blockStart.timeText,
               timestamp: blockStart.timestamp,
               sender: chatMessage.sender || "Unknown",
-              supplier:
-                supplierMarker ||
-                pendingSupplier ||
-                (activeSupplier || "UNASSIGNED"),
               description: body,
               size: extractProductSize(body),
               price: detectedPrice || pendingPrice,
@@ -1137,6 +1074,7 @@ export default function WhatsAppSupplierImportPage() {
               linkedMediaCount: 0,
               sku: "",
               skuMessageIndex: null,
+              supplier: "UNASSIGNED",
               confidence: "Unmapped",
               reviewed: false,
             };
@@ -1168,60 +1106,37 @@ export default function WhatsAppSupplierImportPage() {
             continue;
           }
 
-          if (supplierMarker || detectedPrice) {
+          if (detectedPrice) {
             rememberPendingStart(chatMessage);
-            if (supplierMarker) pendingSupplier = supplierMarker;
-            if (detectedPrice) pendingPrice = detectedPrice;
+            pendingPrice = detectedPrice;
           }
         }
 
-        const queue: ProductBlock[] = [];
-        const events = [
-          ...productList.map((product) => ({
-            type: "product" as const,
-            messageIndex: product.messageIndex,
-            timestamp: product.timestamp,
-            product,
-          })),
-          ...skuEvents.map((skuEvent) => ({
-            type: "sku" as const,
-            ...skuEvent,
-          })),
-        ].sort((a, b) => a.messageIndex - b.messageIndex);
+        // Map SKU replies to nearest previous unassigned product.
+        // Avoid FIFO mismatch caused by media and price messages.
+        for (const skuEvent of skuEvents) {
+          let candidate: ProductBlock | undefined;
 
-        for (const event of events) {
-          if (event.type === "product") {
-            queue.push(event.product);
-            continue;
-          }
+          for (let index = productList.length - 1; index >= 0; index -= 1) {
+            const product = productList[index];
 
-          while (queue.length > 0) {
-            const candidate = queue[0];
-            const productTime = candidate.timestamp;
-            const skuTime = event.timestamp;
-            const gap =
-              productTime !== null && skuTime !== null
-                ? skuTime - productTime
-                : null;
-
-            if (gap !== null && gap > 72 * 60 * 60 * 1000) {
-              queue.shift();
-              candidate.confidence = "Needs Review";
-              continue;
+            if (
+              product.messageIndex < skuEvent.messageIndex &&
+              !product.sku
+            ) {
+              candidate = product;
+              break;
             }
-
-            break;
           }
 
-          const candidate = queue.shift();
           if (!candidate) continue;
 
-          candidate.sku = event.sku;
-          candidate.skuMessageIndex = event.messageIndex;
+          candidate.sku = skuEvent.sku;
+          candidate.skuMessageIndex = skuEvent.messageIndex;
 
           const gap =
-            candidate.timestamp !== null && event.timestamp !== null
-              ? event.timestamp - candidate.timestamp
+            candidate.timestamp !== null && skuEvent.timestamp !== null
+              ? skuEvent.timestamp - candidate.timestamp
               : null;
 
           if (gap !== null && gap >= 0 && gap <= 8 * 60 * 60 * 1000) {
@@ -1505,11 +1420,7 @@ export default function WhatsAppSupplierImportPage() {
       let completed = 0;
 
       for (const product of eligible) {
-        const supplierDirectory = await root.getDirectoryHandle(
-          sanitizeFolderName(product.supplier),
-          { create: true },
-        );
-        const skuDirectory = await supplierDirectory.getDirectoryHandle(
+        const skuDirectory = await root.getDirectoryHandle(
           sanitizeFolderName(product.sku),
           { create: true },
         );
@@ -1535,7 +1446,6 @@ export default function WhatsAppSupplierImportPage() {
         const detailsWritable = await detailsHandle.createWritable();
         await detailsWritable.write(
           [
-            `Supplier: ${product.supplier}`,
             `SKU: ${product.sku}`,
             `Size: ${product.size}`,
             `Price: ${product.price}`,
@@ -1552,7 +1462,7 @@ export default function WhatsAppSupplierImportPage() {
       }
 
       setMessage(
-        `${completed} SKU folder(s) supplier-wise save ho gaye. Omitted media without filename exact link nahi ho sakti.`,
+        `${completed} SKU folder(s) save ho gaye. Omitted media without filename exact link nahi ho sakti.`,
       );
     } catch (saveError) {
       const cancelled =
@@ -1575,7 +1485,7 @@ export default function WhatsAppSupplierImportPage() {
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="text-sm font-black text-emerald-700">
-            WhatsApp Supplier Import
+            WhatsApp SKU Import
           </p>
           <h1 className="mt-1 text-3xl font-black text-slate-950">
             Chat History, SKU Mapping & Media Organizer
@@ -1741,32 +1651,6 @@ export default function WhatsAppSupplierImportPage() {
             </span>
           </label>
 
-          <label className="mt-4 block">
-            <span className="text-xs font-black uppercase text-slate-500">
-              Supplier Codes
-            </span>
-            <textarea
-              value={supplierCodesText}
-              onChange={(event) => setSupplierCodesText(event.target.value)}
-              rows={4}
-              className="mt-2 w-full rounded-2xl border border-slate-300 p-3 text-sm font-bold outline-none focus:border-emerald-500"
-              placeholder="HRT, FFT, SML, SRK"
-            />
-          </label>
-
-          <label className="mt-4 block">
-            <span className="text-xs font-black uppercase text-slate-500">
-              Internal SKU Prefixes
-            </span>
-            <textarea
-              value={skuPrefixesText}
-              onChange={(event) => setSkuPrefixesText(event.target.value)}
-              rows={4}
-              className="mt-2 w-full rounded-2xl border border-slate-300 p-3 text-sm font-bold outline-none focus:border-emerald-500"
-              placeholder="PMM, HRT, FFT, UMZ"
-            />
-          </label>
-
           <button
             type="button"
             onClick={analyzeChat}
@@ -1921,18 +1805,6 @@ export default function WhatsAppSupplierImportPage() {
               />
             </label>
 
-            <select
-              value={supplierFilter}
-              onChange={(event) => setSupplierFilter(event.target.value)}
-              className="h-11 rounded-xl border border-slate-300 px-3 text-sm font-bold outline-none focus:border-emerald-500"
-            >
-              <option value="">All Suppliers</option>
-              {suppliers.map((supplier) => (
-                <option key={supplier} value={supplier}>
-                  {supplier}
-                </option>
-              ))}
-            </select>
 
             <select
               value={statusFilter}
@@ -1967,9 +1839,11 @@ export default function WhatsAppSupplierImportPage() {
                       >
                         {product.confidence}
                       </span>
-                      <span className="rounded-full bg-violet-100 px-3 py-1 text-xs font-black text-violet-800">
-                        {product.supplier}
-                      </span>
+                      {product.supplier && product.supplier !== "UNASSIGNED" && (
+                        <span className="rounded-full bg-violet-100 px-3 py-1 text-xs font-black text-violet-800">
+                          {product.supplier}
+                        </span>
+                      )}
                     </div>
                     <p className="mt-2 text-xs font-bold text-slate-500">
                       {product.dateText} {product.timeText} · {product.sender}
@@ -2018,7 +1892,7 @@ export default function WhatsAppSupplierImportPage() {
                       Supplier
                     </span>
                     <input
-                      value={product.supplier}
+                      value={product.supplier ?? ""}
                       onChange={(event) =>
                         updateProduct(product.id, {
                           supplier: event.target.value.toUpperCase(),

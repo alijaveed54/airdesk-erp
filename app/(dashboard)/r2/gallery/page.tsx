@@ -26,28 +26,7 @@ import type {
 
 import { downloadAsJpg, formatBytes, formatDate } from "./helpers";
 
-const CATEGORY_OPTIONS = [
-  "Saree",
-  "Kurta Set",
-  "Co-ord Set",
-  "Anarkali Set",
-  "Gown",
-  "Lehenga",
-  "Kaftan",
-  "Abaya",
-  "Dress Material",
-  "Top",
-  "Tunic",
-  "Kurti",
-  "Salwar Suit",
-  "Sharara Set",
-  "Garara Set",
-  "Palazzo Set",
-  "Skirt Set",
-  "Jumpsuit",
-  "Blouse",
-  "Dupatta",
-  "Kids Wear",
+const DEFAULT_CATEGORY_OPTIONS = [
   "Other",
 ] as const;
 
@@ -534,6 +513,18 @@ export default function R2GalleryPage() {
     [groups],
   );
 
+  const categoryOptions = useMemo(() => {
+    const detected = groups.flatMap((group) =>
+      group.images
+        .map((image) => aiResults[image.key]?.category)
+        .filter(Boolean) as string[],
+    );
+
+    return Array.from(
+      new Set([...detected, ...DEFAULT_CATEGORY_OPTIONS]),
+    ).sort();
+  }, [aiResults, groups]);
+
   function getGroupPrice(group: GalleryGroup): number | null {
     const groupData = group as unknown as Record<string, unknown>;
     const possibleValues = [
@@ -643,6 +634,11 @@ export default function R2GalleryPage() {
     minPrice,
     search,
   ]);
+
+  const visibleGroups = useMemo(
+    () => filteredGroups.slice(0, 300),
+    [filteredGroups],
+  );
 
   const activeImage = activeGroup?.images[activeIndex];
 
@@ -1281,7 +1277,7 @@ export default function R2GalleryPage() {
         >
           <option value="ALL">All categories</option>
           <option value="NOT_ANALYZED">Not Analyzed Yet</option>
-          {CATEGORY_OPTIONS.map((item) => (
+          {categoryOptions.map((item) => (
             <option key={item} value={item}>
               {item}
             </option>
@@ -1428,7 +1424,7 @@ export default function R2GalleryPage() {
             className="h-11 min-w-[210px] rounded-2xl border border-violet-300 bg-violet-50 px-4 text-sm font-black text-violet-900 outline-none focus:border-violet-500"
           >
             <option value="">Select bulk category</option>
-            {CATEGORY_OPTIONS.map((item) => (
+            {categoryOptions.map((item) => (
               <option key={item} value={item}>
                 {item}
               </option>
@@ -1497,7 +1493,7 @@ export default function R2GalleryPage() {
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10">
-          {filteredGroups.map((group) => (
+          {visibleGroups.map((group) => (
             <article
               key={`${group.sku}-${group.currency}`}
               className={`relative overflow-hidden rounded-xl border bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${
@@ -1568,7 +1564,7 @@ export default function R2GalleryPage() {
                   className="h-7 w-full rounded-lg border border-violet-200 bg-violet-50 px-1.5 text-[10px] font-black text-violet-900 outline-none focus:border-violet-500"
                 >
                   <option value="">Select category</option>
-                  {CATEGORY_OPTIONS.map((item) => (
+                  {categoryOptions.map((item) => (
                     <option key={item} value={item}>
                       {item}
                     </option>
@@ -1624,6 +1620,12 @@ export default function R2GalleryPage() {
               </div>
             </article>
           ))}
+        </div>
+      )}
+
+      {!loading && filteredGroups.length > visibleGroups.length && (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-bold text-amber-700">
+          Showing first {visibleGroups.length} folders for fast rendering. Use filters or load next batch for more records.
         </div>
       )}
 
@@ -1888,7 +1890,7 @@ export default function R2GalleryPage() {
                       className="h-11 rounded-2xl border border-violet-300 bg-violet-50 px-3 text-sm font-black text-violet-900 outline-none focus:border-violet-500"
                     >
                       <option value="">Select bulk category</option>
-                      {CATEGORY_OPTIONS.map((item) => (
+                      {categoryOptions.map((item) => (
                         <option key={item} value={item}>
                           {item}
                         </option>

@@ -611,6 +611,16 @@ function supplierFromSku(sku: string) {
   return match ? match[1] : "";
 }
 
+
+function supplierPrefixMatch(sku: string, supplier: string) {
+  const skuSupplier = supplierFromSku(sku);
+  return Boolean(
+    skuSupplier &&
+      supplier &&
+      skuSupplier.toUpperCase() === supplier.toUpperCase(),
+  );
+}
+
 function normalizeSkuMarker(value: string) {
   return String(value || "")
     .trim()
@@ -705,8 +715,8 @@ export function parseTimelineHistory(
       : "";
 
     if (authorizedSku) {
+      // Store SKU first. Final matching happens after all products are collected.
       currentProduct = null;
-      clearPendingBlock();
       skuEvents.push({
         messageIndex: chatMessage.index,
         timestamp: chatMessage.timestamp,
@@ -737,6 +747,8 @@ export function parseTimelineHistory(
     if (!body || isDeletedOrSystem(body)) continue;
 
     if (isSeparator(body)) {
+      // Separator ends a chat block. Keep already created products safe;
+      // SKU mapping is done after collecting all messages.
       currentProduct = null;
       clearPendingBlock();
       continue;
@@ -837,12 +849,16 @@ export function parseTimelineHistory(
   }
 
   const consumedSkuEvents = new Set<string>();
+  const assignedSkus = new Set<string>();
 
   // First preference: exact WhatsApp quoted reply relation.
   for (const event of skuEvents) {
     if (!event.quotedMessageId) continue;
     const product = productByQuotedMessageId.get(event.quotedMessageId);
     if (!product) continue;
+
+    if (assignedSkus.has(event.sku)) continue;
+    assignedSkus.add(event.sku);
 
     product.sku = event.sku;
     product.supplier = supplierFromSku(event.sku) || product.supplier;
@@ -879,9 +895,30 @@ export function parseTimelineHistory(
       break;
     }
 
-    const candidate = queue[0];
-    if (!candidate || candidate.messageIndex >= event.messageIndex) continue;
-    queue.shift();
+    let candidateIndex = queue.findIndex((item) => {
+      if (item.messageIndex >= event.messageIndex) return false;
+
+      const supplier = supplierFromSku(event.sku);
+      return Boolean(
+        supplier &&
+          (item.supplier.toUpperCase() === supplier ||
+            supplierPrefixMatch(event.sku, item.supplier)),
+      );
+    });
+
+    if (candidateIndex < 0) {
+      candidateIndex = queue.findIndex(
+        (item) => item.messageIndex < event.messageIndex,
+      );
+    }
+
+    if (candidateIndex < 0) continue;
+
+    const candidate = queue[candidateIndex];
+    queue.splice(candidateIndex, 1);
+
+    if (assignedSkus.has(event.sku)) continue;
+    assignedSkus.add(event.sku);
 
     candidate.sku = event.sku;
     candidate.supplier = supplierFromSku(event.sku) || candidate.supplier;

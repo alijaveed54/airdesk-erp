@@ -379,42 +379,6 @@ export async function POST(
       await request.json();
 
 
-    // Product Batch Support
-    // Converts product payload into existing groups/posts structure.
-    // Existing normal batch flow remains unchanged.
-
-    if (
-      Array.isArray(body.products) &&
-      body.products.length > 0 &&
-      !Array.isArray(body.groups)
-    ) {
-      body.groups = body.products.map((product: any) => ({
-        id: crypto.randomUUID(),
-        pageRecordIds:
-          body.pageRecordIds || [],
-        intervalMinutes:
-          Number(body.intervalMinutes || 10),
-        autoShuffleImages: true,
-        startAt:
-          body.startAt || "",
-        posts: [
-          {
-            id: crypto.randomUUID(),
-            message:
-              product.caption ||
-              `New Product - ${product.sku || ""}`,
-            imageUrls:
-              product.imageUrls || [],
-            imageNames: [],
-            videoUrl: "",
-            videoName: "",
-            videoPosition: "last",
-          },
-        ],
-      }));
-    }
-
-
     batchId =
       cleanString(
         body.batchId,
