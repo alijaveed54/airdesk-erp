@@ -239,7 +239,7 @@ async function fetchDelayedRows(token: string, source: Source) {
         row.orderNo &&
         isAllowedStatus(row.orderStatus) &&
         isNotReceived(row.receivedInWh1) &&
-        row.hoursSinceCreated >= 48,
+        row.hoursSinceCreated >= 72,
     );
 }
 

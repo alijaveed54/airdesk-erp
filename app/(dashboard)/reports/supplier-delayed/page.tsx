@@ -161,7 +161,7 @@ export default function SupplierDelayedOrdersPage() {
         </h1>
 
         <p className="mt-1 text-sm font-bold text-slate-500">
-          Shows supplier orders that are 48+ hours old and not yet dispatched or stocked out.
+          Shows supplier orders that are 72+ hours old and not yet dispatched or stocked out.
         </p>
       </div>
 
@@ -232,7 +232,7 @@ export default function SupplierDelayedOrdersPage() {
       <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
         <div className="border-b border-slate-200 px-5 py-4">
           <h2 className="text-lg font-black text-slate-900">
-            Delayed Orders (48+ Hours)
+            Delayed Orders (72+ Hours)
           </h2>
 
           <p className="text-xs font-bold text-slate-500">
@@ -326,7 +326,7 @@ export default function SupplierDelayedOrdersPage() {
                     colSpan={8}
                     className="px-4 py-12 text-center font-bold text-slate-500"
                   >
-                    No delayed orders found (48+ hours old, not dispatched/stocked out).
+                    No delayed orders found (72+ hours old, not dispatched/stocked out).
                   </td>
                 </tr>
               )}
