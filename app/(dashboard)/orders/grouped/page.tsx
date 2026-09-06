@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Check, RotateCcw, Trash2, RefreshCw } from "lucide-react";
 
 type OrderGroup = {
   orderNo: string;
@@ -36,6 +37,7 @@ type OrderGroup = {
 export default function GroupedOrdersPage() {
   const [orders, setOrders] = useState<OrderGroup[]>([]);
   const [loading, setLoading] = useState(false);
+  const loadingRequestRef = useRef(false);
 
   const [search, setSearch] = useState("");
   const [date, setDate] = useState("");
@@ -56,6 +58,7 @@ const [isI5qDqBase, setIsI5qDqBase] = useState(false);
 const [selectedBaseName, setSelectedBaseName] = useState("");
 const [orderMode, setOrderMode] = useState("ALL");
 const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
+const [userRole, setUserRole] = useState("");
 
   function isYesValue(value: unknown) {
     const normalized = String(value ?? "").trim().toLowerCase();
@@ -120,6 +123,8 @@ const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
     orderStatus?: string;
     orderMode?: string;
   }) {
+    if (loadingRequestRef.current) return;
+    loadingRequestRef.current = true;
     setLoading(true);
 
     const params = new URLSearchParams();
@@ -158,12 +163,127 @@ if (effectiveOrderMode !== "ALL") params.set("orderMode", effectiveOrderMode);
     }
 
     setLoading(false);
+    loadingRequestRef.current = false;
   }
 function toggleOrder(orderNo: string) {
   setExpandedOrders((prev) =>
     prev.includes(orderNo)
       ? prev.filter((item) => item !== orderNo)
       : [...prev, orderNo]
+  );
+}
+
+
+async function refreshOrder(orderNo: string) {
+  const params = new URLSearchParams();
+  params.set("orderNo", orderNo);
+
+  const res = await fetch(`/api/orders/grouped-items?${params.toString()}`);
+  const data = await res.json();
+
+  if (!res.ok || !data.success) {
+    alert(data.message || "Order refresh failed");
+    return;
+  }
+
+  const freshOrder = data.orders?.[0];
+  if (!freshOrder) return;
+
+  setOrders((prev) =>
+    prev.map((order) =>
+      order.orderNo === orderNo ? freshOrder : order
+    )
+  );
+}
+
+async function refreshItem(orderNo: string, itemId: string) {
+  const params = new URLSearchParams();
+  params.set("orderNo", orderNo);
+
+  const res = await fetch(`/api/orders/grouped-items?${params.toString()}`);
+  const data = await res.json();
+
+  if (!res.ok || !data.success) {
+    alert(data.message || "Item refresh failed");
+    return;
+  }
+
+  const freshOrder = data.orders?.[0];
+  const freshItem = freshOrder?.items?.find((item:any) => item.id === itemId);
+
+  if (!freshItem) return;
+
+  setOrders((prev) =>
+    prev.map((order) =>
+      order.orderNo === orderNo
+        ? {
+            ...order,
+            items: order.items.map((item:any) =>
+              item.id === itemId ? freshItem : item
+            ),
+          }
+        : order
+    )
+  );
+}
+
+const isAdmin = userRole === "Admin";
+
+async function updateReceivedUae(item: any, value: boolean) {
+  const res = await fetch("/api/order-items/update", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      items: [{ id: item.id, receivedInUae: value ? "Yes" : "" }],
+    }),
+  });
+
+  const data = await res.json();
+  if (!res.ok || !data.success) {
+    alert(data.message || "Update failed");
+    return;
+  }
+  setOrders((prev) =>
+    prev.map((order) => ({
+      ...order,
+      items: order.items.map((i: any) =>
+        i.id === item.id
+          ? {
+              ...i,
+              fields: {
+                ...i.fields,
+                received_in_uae_2: value ? "Yes" : "",
+                received_in_uae_datetime: value
+                  ? new Date().toISOString()
+                  : "",
+              },
+            }
+          : i
+      ),
+    }))
+  );
+}
+
+async function deleteItem(item: any) {
+  if (!confirm("Delete this item?")) return;
+
+  const res = await fetch("/api/order-items/delete", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids: [item.id] }),
+  });
+
+  const data = await res.json();
+  if (!res.ok || !data.success) {
+    alert(data.message || "Delete failed");
+    return;
+  }
+  setOrders((prev) =>
+    prev.map((order) => ({
+      ...order,
+      items: order.items.filter((i: any) => i.id !== item.id),
+      totalItems: Math.max(0, (order.totalItems || 0) - 1),
+    }))
   );
 }
 
@@ -206,6 +326,7 @@ async function loadOrderImages(orderNo: string) {
         ]);
 
         const baseData = await baseRes.json();
+        setUserRole(baseData.user?.role || "");
         const optionsData = await optionsRes.json();
 
         if (optionsRes.ok && optionsData.success) {
@@ -240,16 +361,15 @@ async function loadOrderImages(orderNo: string) {
           normalized.includes("bs base") ||
           normalized.includes("bs order entry");
 
-        const defaultStatus =
-          isBsBase || isTatBase ? "Order Received" : "";
-
         const defaultMode = isDqBase ? "DQ" : "ALL";
 
-        setOrderStatus(defaultStatus);
+        // Do not auto-select Order Received on page load.
+        // User should choose Order Status manually.
+        setOrderStatus("");
         setOrderMode(defaultMode);
 
         await loadOrders({
-          orderStatus: defaultStatus,
+          orderStatus: "",
           orderMode: defaultMode,
         });
       } catch (error) {
@@ -545,6 +665,18 @@ async function loadOrderImages(orderNo: string) {
   {imageLoadedOrders.includes(order.orderNo) ? "Hide Images" : "Load Images"}
 </button>
 
+<button
+  type="button"
+  onClick={(e) => {
+    e.stopPropagation();
+    refreshOrder(order.orderNo);
+  }}
+  className="mb-2 ml-2 inline-flex items-center gap-2 rounded-xl border border-slate-300 bg-slate-50 px-4 py-2 text-sm font-black text-slate-700 hover:bg-slate-100"
+>
+  <RefreshCw size={16} />
+  Refresh
+</button>
+
                   <div className="space-y-1 text-right">
 
   <p className="font-black">
@@ -591,7 +723,7 @@ async function loadOrderImages(orderNo: string) {
 
               {expandedOrders.includes(order.orderNo) && (
                 <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200">
-                  <table className="w-full text-sm">
+                  <table className="w-full table-fixed text-sm">
                     <thead className="bg-slate-100">
                       <tr>
                         <th className="px-4 py-3 text-left">Image</th>
@@ -612,6 +744,7 @@ async function loadOrderImages(orderNo: string) {
                             <th className="px-4 py-3 text-left">Received Date</th>
                             <th className="px-4 py-3 text-left">Bill No</th>
                             <th className="px-4 py-3 text-left">Item Value</th>
+                            {isAdmin && <th className="w-52 px-4 py-3 text-left">Actions</th>}
                           </>
                         )}
                       </tr>
@@ -693,13 +826,63 @@ async function loadOrderImages(orderNo: string) {
                                 {item.fields.received_in_wh_1 || "-"}
                               </td>
                               <td className="px-4 py-3 font-semibold">
-                                {isValidReceivedInUae(item)
+                                {item.fields.received_in_uae_datetime
                                   ? formatReceivedDate(item.fields.received_in_uae_datetime)
                                   : "-"}
                               </td>
                               <td className="px-4 py-3">
                                 {item.fields.bill_no || "-"}
                               </td>
+                              <td className="px-4 py-3 font-semibold">
+                                {item.fields["item value"] || "-"}
+                              </td>
+                              {isAdmin && (
+                                <td className="px-4 py-3">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    {isValidReceivedInUae(item) ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => updateReceivedUae(item, false)}
+                                        title="Undo Received in UAE"
+                                        aria-label="Undo Received in UAE"
+                                        className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-orange-200 bg-orange-50 text-orange-600 transition hover:bg-orange-100"
+                                      >
+                                        <RotateCcw size={16} />
+                                      </button>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onClick={() => updateReceivedUae(item, true)}
+                                        title="Mark Received in UAE"
+                                        aria-label="Mark Received in UAE"
+                                        className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-600 transition hover:bg-emerald-100"
+                                      >
+                                        <Check size={18} />
+                                      </button>
+                                    )}
+
+                                    <button
+                                      type="button"
+                                      onClick={() => refreshItem(order.orderNo, item.id)}
+                                      title="Refresh Item"
+                                      aria-label="Refresh Item"
+                                      className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-blue-200 bg-blue-50 text-blue-600 transition hover:bg-blue-100"
+                                    >
+                                      <RefreshCw size={16} />
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => deleteItem(item)}
+                                      title="Delete Item"
+                                      aria-label="Delete Item"
+                                      className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-red-200 bg-red-50 text-red-600 transition hover:bg-red-100"
+                                    >
+                                      <Trash2 size={16} />
+                                    </button>
+                                  </div>
+                                </td>
+                              )}
                             </>
                           )}
                         </tr>

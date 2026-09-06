@@ -15,6 +15,9 @@ export default function UaePublicStockPage() {
   const [category, setCategory] = useState("");
   const [color, setColor] = useState("");
   const [size, setSize] = useState("");
+  const [fabric, setFabric] = useState("");
+  const [minPrice, setMinPrice] = useState("");
+  const [maxPrice, setMaxPrice] = useState("");
   const [sort, setSort] = useState("sku-asc");
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [selectedProduct, setSelectedProduct] = useState<PublicStockProduct | null>(null);
@@ -219,6 +222,9 @@ export default function UaePublicStockPage() {
         category={category}
         color={color}
         size={size}
+        fabric={fabric}
+        minPrice={minPrice}
+        maxPrice={maxPrice}
         sort={sort}
         categories={categories}
         colors={colors}
@@ -227,6 +233,9 @@ export default function UaePublicStockPage() {
         onCategoryChange={setCategory}
         onColorChange={setColor}
         onSizeChange={setSize}
+        onFabricChange={setFabric}
+        onMinPriceChange={setMinPrice}
+        onMaxPriceChange={setMaxPrice}
         onSortChange={setSort}
         onReset={resetFilters}
       />
@@ -279,7 +288,14 @@ export default function UaePublicStockPage() {
 }
 
 function unique(values: string[]) {
-  return [...new Set(values.map((value) => value.trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  return [
+    ...new Set(
+      values
+        .filter(Boolean)
+        .map((value) => String(value).trim())
+        .filter(Boolean),
+    ),
+  ].sort((a, b) => a.localeCompare(b));
 }
 
 function Message({ text }: { text: string }) {

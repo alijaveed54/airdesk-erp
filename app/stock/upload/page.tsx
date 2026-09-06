@@ -394,28 +394,28 @@ function parseFile(
     return { file, reason: "Only JPG, PNG and WEBP are allowed" };
   }
 
-  const baseName = stripExtension(file.name).trim();
+  if (file.size > 20 * 1024 * 1024) {
+    return { file, reason: "File is larger than 20 MB" };
+  }
 
-  // Supported:
-  // AJM1002 - AED 110 Size - 2XL
-  // AJM1002 - AED 110 - Size - 2XL
-  // AJM1002 - AED 110 (01) Size - 2XL Fabric - Cotton
-  const match = baseName.match(
+  const baseName = stripExtension(file.name).trim();
+  const coreMatch = baseName.match(
     /^([A-Za-z0-9_-]+)\s*-\s*(AED|QAR)\s+([0-9]+(?:\.[0-9]+)?)(?:\s*\(([^)]+)\))?/i,
   );
 
-  if (match) {
-    const sizeMatch = baseName.match(/\bSize\s*-\s*(.+?)(?=\s+Fabric\s*-|$)/i);
+  if (coreMatch) {
+    const sizeMatch = baseName.match(
+      /\bSize\s*-\s*(.+?)(?=\s+Fabric\s*-|$)/i,
+    );
     const fabricMatch = baseName.match(/\bFabric\s*-\s*(.+)$/i);
-
     const fabricDetail = fabricMatch?.[1]?.trim() || "";
 
     return {
       file,
-      sku: match[1].toUpperCase(),
-      currency: match[2].toUpperCase() as Currency,
-      price: match[3],
-      imageNumber: match[4]?.trim().padStart(2, "0") || "00",
+      sku: coreMatch[1].toUpperCase(),
+      currency: coreMatch[2].toUpperCase() as Currency,
+      price: coreMatch[3],
+      imageNumber: coreMatch[4]?.trim().padStart(2, "0") || "00",
       sizes: sizeMatch ? expandSizes(sizeMatch[1]) : [],
       fabricDetail,
       mainFabric: fabricDetail ? getMainFabric(fabricDetail) : "",
@@ -427,12 +427,14 @@ function parseFile(
     const skuMatch = baseName.match(/^([A-Za-z0-9_-]+)/);
 
     if (skuMatch) {
+      const imageNumberMatch = baseName.match(/\(([^)]+)\)/);
+
       return {
         file,
         sku: skuMatch[1].toUpperCase(),
         currency: "PENDING",
         price: "",
-        imageNumber: "00",
+        imageNumber: imageNumberMatch?.[1]?.trim().padStart(2, "0") || "00",
         sizes: [],
         fabricDetail: "",
         mainFabric: "",
@@ -443,7 +445,8 @@ function parseFile(
 
   return {
     file,
-    reason: "Expected: SKU - AED/QAR Price Size - ...",
+    reason:
+      "Expected: SKU - AED/QAR Price Size - ... Fabric - ...",
   };
 }
 
@@ -468,6 +471,7 @@ export default function R2BulkUploadPage() {
   >({});
   const [allowSkuOnly, setAllowSkuOnly] = useState(false);
   const [selectingFolder, setSelectingFolder] = useState(false);
+  const [mainFolder, setMainFolder] = useState("");
 
   const parsed = useMemo(
     () => selectedFiles.map((file) => parseFile(file, allowSkuOnly)),
@@ -652,11 +656,12 @@ export default function R2BulkUploadPage() {
       const webpFile = await convertToWebP(item.file);
       const formData = new FormData();
       formData.append("file", webpFile);
+       formData.append("mainFolder", mainFolder);
       if (item.needsManualInfo) {
         formData.append("allowSkuOnly", "1");
       }
 
-      const response = await fetch("/api/r2/upload", {
+      const response = await fetch("/api/stock/upload", {
         method: "POST",
         body: formData,
       });
@@ -801,6 +806,20 @@ export default function R2BulkUploadPage() {
       </div>
 
       <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+        <div className="mb-5">
+          <label className="mb-2 block text-sm font-black text-slate-700">
+            Stock Folder Name
+          </label>
+          <input
+            type="text"
+            value={mainFolder}
+            onChange={(event) => setMainFolder(event.target.value)}
+            placeholder="Example: Medium"
+            disabled={uploading || uploadFinished}
+            className="w-full rounded-xl border border-slate-300 px-4 py-3 font-bold"
+          />
+        </div>
+
         <div
           onDragOver={(event) => event.preventDefault()}
           onDragEnter={() => setDragging(true)}
@@ -994,7 +1013,7 @@ export default function R2BulkUploadPage() {
                   className="rounded-2xl border border-slate-200 p-4"
                 >
                   <p className="text-lg font-black text-slate-950">
-                    products/{group.sku}/
+                    Stock/{mainFolder}/{group.sku}/
                   </p>
 
                   <div className="mt-3 grid grid-cols-2 gap-3">

@@ -23,7 +23,6 @@ import {
   Download,
   ListChecks,
   PackageCheck,
-  AlertTriangle,
   MessageCircle,
   Database,
   Clock,
@@ -165,19 +164,6 @@ export default function Sidebar() {
     },
     {
       show:
-        !isEmployeeRole &&
-        session?.role !== "Supplier" &&
-        (isAdmin ||
-          Boolean(
-            permission?.canView ||
-              permission?.canReports,
-          )),
-      href: "/exceptions",
-      label: "Exception Dashboard",
-      icon: AlertTriangle,
-    },
-    {
-      show:
         session?.role !== "Supplier" &&
         (isAdmin || Boolean(permission?.canView)),
       href: "/orders/list",
@@ -221,12 +207,6 @@ export default function Sidebar() {
       label: "Supplier Pending",
       icon: Truck,
     },
-    {
-  label: "Supplier Delayed",
-  href: "/reports/supplier-delayed",
-  icon: "Clock", // ya jo bhi icon system use ho raha hai
-},
-
     {
       show: isAdmin || Boolean(permission?.canReports),
       href: "/reports",
@@ -322,6 +302,24 @@ export default function Sidebar() {
   label: "Supplier Delayed",
   icon: Clock,
 },
+{
+  show:
+    !isEmployeeRole &&
+    session?.role !== "Supplier" &&
+    (isAdmin || Boolean(permission?.canReports)),
+  href: "/reports/received-in-uae-delay",
+  label: "Received In UAE Delay",
+  icon: Clock,
+},
+    {
+      show:
+        !isEmployeeRole &&
+        session?.role !== "Supplier" &&
+        (isAdmin || Boolean(permission?.canReports)),
+      href: "/india-uae-transit",
+      label: "India → UAE Transit",
+      icon: Truck,
+    },
 
     {
       show:
@@ -330,6 +328,15 @@ export default function Sidebar() {
         isEmployee,
       href: "/orders/uae-receiving",
       label: "UAE Receiving",
+      icon: PackageCheck,
+    },
+    {
+      show:
+        isAdmin ||
+        isManager ||
+        isEmployee,
+      href: "/reports/doha-receiving",
+      label: "Doha Receiving",
       icon: PackageCheck,
     },
     {
@@ -442,7 +449,6 @@ export default function Sidebar() {
     nav.filter(
       (item) =>
         item.href.startsWith("/orders") ||
-        item.href === "/exceptions" ||
         item.href === "/reports/ready-to-process",
     ),
     [
@@ -459,13 +465,17 @@ export default function Sidebar() {
     nav.filter(
       (item) =>
         item.href === "/suppliers" ||
-        item.href.includes("supplier-"),
+        item.href.includes("supplier-") ||
+        item.href === "/reports/india-uae-transit",
     ),
     [
-      "/suppliers",
-      "/reports/supplier-activity",
-      "/reports/supplier-bill-dispatch",
-    ],
+  "/suppliers",
+  "/reports/supplier-activity",
+  "/reports/supplier-bill-dispatch",
+  "/reports/supplier-delayed",
+  "/reports/received-in-uae-delay",
+  "/reports/india-uae-transit",
+],
   );
 
   const supplierPrimaryNav = supplierNav.filter(
@@ -498,6 +508,7 @@ export default function Sidebar() {
     ),
     [
       "/reports",
+      "/reports/doha-receiving",
       "/reports/cod",
       "/reports/pending",
       "/reports/order-pending",
@@ -718,6 +729,28 @@ export default function Sidebar() {
                     >
                       <span className="h-2 w-2 rounded-full bg-current" />
                       UAE Public Stock ↗
+                    </Link>
+
+                    <Link
+                      href="/stock/upload"
+                      className={childLinkClass(
+                        pathname === "/stock/upload",
+                        "blue",
+                      )}
+                    >
+                      <span className="h-2 w-2 rounded-full bg-current" />
+                      Stock Image Upload
+                    </Link>
+
+                    <Link
+                      href="/stock/manage"
+                      className={childLinkClass(
+                        pathname === "/stock/manage",
+                        "blue",
+                      )}
+                    >
+                      <span className="h-2 w-2 rounded-full bg-current" />
+                      Stock Manage
                     </Link>
                   </div>
                 )}

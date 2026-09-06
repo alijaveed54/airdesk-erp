@@ -222,6 +222,9 @@ export async function PATCH(req: NextRequest) {
     const body = await req.json();
     const items = body.items || [];
 
+    const requestBaseId = body.baseId || items[0]?.baseId;
+    const requestTableName = body.tableName || items[0]?.tableName;
+
     if (!Array.isArray(items) || items.length === 0) {
       return NextResponse.json(
         { success: false, message: "Items are required" },
@@ -247,16 +250,26 @@ export async function PATCH(req: NextRequest) {
     const configuredOrderEntryTable =
       airtable.tables.orderEntry || "BS Order Entry";
 
-    const orderEntryTable = await resolveOrderEntryTable({
-      baseId: airtable.baseId,
-      token: airtable.token,
-      baseName: airtable.baseName,
-      configuredTable: configuredOrderEntryTable,
-      recordId: String(items[0].id),
-    });
+    const hasDispatchToDohaUpdate = items.some(
+      (item: any) => item?.dispatchToDoha !== undefined
+    );
+
+    const orderEntryTable = hasDispatchToDohaUpdate
+      ? (requestTableName || "FAB Order Entry")
+      : await resolveOrderEntryTable({
+          baseId: airtable.baseId,
+          token: airtable.token,
+          baseName: airtable.baseName,
+          configuredTable: configuredOrderEntryTable,
+          recordId: String(items[0].id),
+        });
+
+    const updateBaseId = hasDispatchToDohaUpdate
+      ? (requestBaseId || "appiz6tozkQO2TQXt")
+      : airtable.baseId;
 
     const schemaFields = await loadOrderEntrySchema({
-      baseId: airtable.baseId,
+      baseId: updateBaseId,
       token: airtable.token,
       tableName: orderEntryTable,
     });
@@ -305,6 +318,21 @@ export async function PATCH(req: NextRequest) {
         "Received In UAE",
         "Received in UAE",
         "received_in_uae",
+      ]),
+      receivedInUaeDateTime: findWritableField(schemaFields, [
+        "Received In UAE DateTime",
+        "Received in UAE DateTime",
+        "Received In UAE Date Time",
+        "received_in_uae_datetime",
+      ]),
+      dispatchToDoha: findWritableField(schemaFields, [
+        "Dispatch To Doha",
+        "dispatch_to_doha",
+      ]),
+      dispatchToDohaDateTime: findWritableField(schemaFields, [
+        "Dispatch To Doha DateTime",
+        "Dispatch To Doha Date Time",
+        "dispatch_to_doha_datetime",
       ]),
       inStock: findWritableField(schemaFields, [
         "instock",
@@ -425,6 +453,41 @@ export async function PATCH(req: NextRequest) {
       }
 
       if (
+        fieldMap.receivedInUae &&
+        item.receivedInUae !== undefined
+      ) {
+        const isReceived = String(item.receivedInUae || "").trim() === "Yes";
+
+        fields[fieldMap.receivedInUae.name] = isReceived
+          ? valueForYesField(fieldMap.receivedInUae)
+          : valueForBlankField(fieldMap.receivedInUae);
+
+        if (fieldMap.receivedInUaeDateTime) {
+          fields[fieldMap.receivedInUaeDateTime.name] = isReceived
+            ? new Date().toISOString()
+            : null;
+        }
+      }
+
+      if (
+        fieldMap.dispatchToDoha &&
+        item.dispatchToDoha !== undefined
+      ) {
+        const isDispatched =
+          String(item.dispatchToDoha || "").trim().toLowerCase() === "dispatched";
+
+        fields[fieldMap.dispatchToDoha.name] = isDispatched
+          ? valueForField(fieldMap.dispatchToDoha, "Dispatched")
+          : valueForBlankField(fieldMap.dispatchToDoha);
+
+        if (fieldMap.dispatchToDohaDateTime) {
+          fields[fieldMap.dispatchToDohaDateTime.name] = isDispatched
+            ? new Date().toISOString()
+            : null;
+        }
+      }
+
+      if (
         fieldMap.billNo &&
         item.billNo !== undefined &&
         !markAsBsInstock
@@ -485,7 +548,7 @@ export async function PATCH(req: NextRequest) {
     for (const recordBatch of chunkRecords(records, 10)) {
       const response = await fetch(
         airtableUrl(
-          airtable.baseId,
+          updateBaseId,
           orderEntryTable
         ),
         {
@@ -541,7 +604,7 @@ export async function PATCH(req: NextRequest) {
     try {
       const invoiceIds =
         await resolveInvoiceIdsForOrderEntryRecords({
-          baseId: airtable.baseId,
+          baseId: updateBaseId,
           token: airtable.token,
           orderEntryTableName: orderEntryTable,
           invoiceTableName,
@@ -576,6 +639,8 @@ export async function PATCH(req: NextRequest) {
         supplier: fieldMap.supplier?.name || null,
         receivedWh: fieldMap.receivedWh?.name || null,
         receivedInUae: fieldMap.receivedInUae?.name || null,
+        dispatchToDoha: fieldMap.dispatchToDoha?.name || null,
+        dispatchToDohaDateTime: fieldMap.dispatchToDohaDateTime?.name || null,
         inStock: fieldMap.inStock?.name || null,
         billNo: fieldMap.billNo?.name || null,
         size: fieldMap.size?.name || null,

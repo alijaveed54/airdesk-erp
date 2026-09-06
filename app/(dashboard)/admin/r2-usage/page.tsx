@@ -203,6 +203,10 @@ export default function R2UsagePage() {
   const [message, setMessage] = useState("");
   const [currentPrefix, setCurrentPrefix] = useState("");
   const [deleteTarget, setDeleteTarget] = useState("");
+  const [selectedFolders, setSelectedFolders] = useState<string[]>([]);
+  const [uploadDate, setUploadDate] = useState("");
+  const [moveTarget, setMoveTarget] = useState("");
+  const [moving, setMoving] = useState(false);
 
   const loadUsage = useCallback(async (prefix = currentPrefix) => {
     setLoading(true);
@@ -253,6 +257,105 @@ export default function R2UsagePage() {
       return { label: part, prefix: built };
     });
   }, [data]);
+
+
+  function selectFoldersByDate() {
+    if (!uploadDate || !data) return;
+
+    const selected = data.explorer.folders
+      .filter((folder) => {
+        if (!folder.latestModified) return false;
+        return folder.latestModified.slice(0, 10) === uploadDate;
+      })
+      .map((folder) => folder.prefix);
+
+    setSelectedFolders(selected);
+
+    setMessage(`${selected.length} folders selected for ${uploadDate}`);
+  }
+
+
+  async function moveSelectedFolders() {
+    if (!selectedFolders.length || !moveTarget.trim()) return;
+
+    const confirmMove = window.confirm(
+      `Move ${selectedFolders.length} folder(s) to ${moveTarget}?`
+    );
+
+    if (!confirmMove) return;
+
+    setMoving(true);
+    setError("");
+    setMessage("");
+
+    try {
+      const response = await fetch("/api/admin/r2-usage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prefixes: selectedFolders,
+          destination: moveTarget,
+        }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || "Move failed");
+      }
+
+      setMessage(`${result.movedCount || 0} object(s) moved successfully.`);
+      setSelectedFolders([]);
+      setMoveTarget("");
+      await loadUsage(currentPrefix);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Move failed");
+    } finally {
+      setMoving(false);
+    }
+  }
+
+  async function deleteSelectedFolders() {
+    if (selectedFolders.length === 0) return;
+
+    const typed = window.prompt(
+      `WARNING: ${selectedFolders.length} folders permanently delete hongay. Confirm karne ke liye DELETE type karein.`,
+      "",
+    );
+
+    if (typed !== "DELETE") return;
+
+    setError("");
+    setMessage("");
+    setDeleteTarget("bulk");
+
+    try {
+      const response = await fetch("/api/admin/r2-usage", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prefixes: selectedFolders,
+          confirm: "DELETE",
+        }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || "Bulk delete failed");
+      }
+
+      setMessage(
+        `${formatNumber(result.deletedCount || 0)} objects deleted successfully.`,
+      );
+      setSelectedFolders([]);
+      await loadUsage(currentPrefix);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Bulk delete failed");
+    } finally {
+      setDeleteTarget("");
+    }
+  }
 
   async function deleteR2Target(
     target: { key: string } | { prefix: string },
@@ -482,6 +585,63 @@ export default function R2UsagePage() {
                   >
                     <Home size={14} /> Root
                   </button>
+                  {data.explorer.folders.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        type="date"
+                        value={uploadDate}
+                        onChange={(e) => setUploadDate(e.target.value)}
+                        className="rounded-lg border px-3 py-2 text-xs font-black"
+                      />
+
+                      <button
+                        type="button"
+                        onClick={selectFoldersByDate}
+                        className="rounded-lg bg-blue-100 px-3 py-2 text-xs font-black text-blue-800"
+                      >
+                        Select Date Folders
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setSelectedFolders(data.explorer.folders.map((folder) => folder.prefix))
+                        }
+                        className="rounded-lg bg-slate-100 px-3 py-2 text-xs font-black"
+                      >
+                        Select All Folders
+                      </button>
+
+                      {selectedFolders.length > 0 && (
+                        <>
+                          <input
+                            type="text"
+                            value={moveTarget}
+                            onChange={(e) => setMoveTarget(e.target.value)}
+                            placeholder="Move to prefix e.g. stock/"
+                            className="rounded-lg border px-3 py-2 text-xs font-black"
+                          />
+
+                          <button
+                            type="button"
+                            disabled={moving}
+                            onClick={() => void moveSelectedFolders()}
+                            className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-black text-white disabled:opacity-50"
+                          >
+                            {moving ? "Moving..." : `Move Selected (${selectedFolders.length})`}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => void deleteSelectedFolders()}
+                            className="rounded-lg bg-red-600 px-3 py-2 text-xs font-black text-white"
+                          >
+                            Delete Selected ({selectedFolders.length})
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+
                   {breadcrumbs.map((crumb) => (
                     <span key={crumb.prefix} className="inline-flex items-center gap-1">
                       <ChevronRight size={13} className="text-slate-400" />
@@ -531,6 +691,18 @@ export default function R2UsagePage() {
                   {data.explorer.folders.map((folder) => (
                     <tr key={folder.prefix} className="border-t border-slate-100 hover:bg-slate-50">
                       <td className="px-5 py-4">
+                        <input
+                          type="checkbox"
+                          checked={selectedFolders.includes(folder.prefix)}
+                          onChange={(e) =>
+                            setSelectedFolders((prev) =>
+                              e.target.checked
+                                ? [...prev, folder.prefix]
+                                : prev.filter((item) => item !== folder.prefix),
+                            )
+                          }
+                          className="mr-3"
+                        />
                         <button
                           type="button"
                           onClick={() => void loadUsage(folder.prefix)}

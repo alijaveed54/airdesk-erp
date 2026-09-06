@@ -9,6 +9,7 @@ export type PublicStockProduct = {
   category: string;
   color: string;
   size: string;
+  fabric?: string;
 };
 
 type Props = {
@@ -36,6 +37,7 @@ export default function ProductCard({
       product.category ? `Category: ${product.category}` : "",
       product.color ? `Color: ${product.color}` : "",
       product.size ? `Size: ${product.size}` : "",
+      product.fabric ? `Fabric: ${product.fabric}` : "",
     ]
       .filter(Boolean)
       .join("\n");

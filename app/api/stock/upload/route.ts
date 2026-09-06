@@ -1,4 +1,4 @@
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { parseSizes } from "@/lib/sizes";
@@ -53,6 +53,74 @@ function getConfig() {
   };
 }
 
+
+async function updateStockIndex(
+  client: S3Client,
+  bucketName: string,
+  publicUrl: string,
+  key: string,
+  parsed: ParsedName,
+) {
+  let products: any[] = [];
+
+  try {
+    const existing = await client.send(
+      new GetObjectCommand({
+        Bucket: bucketName,
+        Key: "Stock/stock-index.json",
+      }),
+    );
+
+    const text = await existing.Body?.transformToString();
+
+    if (text) {
+      products = JSON.parse(text);
+    }
+  } catch {
+    products = [];
+  }
+
+  const folder = key.split("/")[1] || "";
+  const imageUrl = `${publicUrl}/${key}`;
+  const id = `${parsed.sku}-${folder}-${parsed.currency}`;
+
+  let product = products.find((item) => item.id === id);
+
+  if (!product) {
+    product = {
+      id,
+      sku: parsed.sku,
+      price: Number(parsed.price || 0),
+      currency: parsed.currency,
+      size: folder.replace("Size - ", ""),
+      fabric: parsed.mainFabric || "",
+      category: "",
+      color: "",
+      balanceStock: 0,
+      image: imageUrl,
+      images: [],
+    };
+
+    products.push(product);
+  }
+
+  if (!product.images.includes(imageUrl)) {
+    product.images.push(imageUrl);
+  }
+
+  product.balanceStock = product.images.length;
+
+  await client.send(
+    new PutObjectCommand({
+      Bucket: bucketName,
+      Key: "Stock/stock-index.json",
+      Body: JSON.stringify(products, null, 2),
+      ContentType: "application/json",
+      CacheControl: "public, max-age=300",
+    }),
+  );
+}
+
 function stripExtension(fileName: string) {
   const lastDot = fileName.lastIndexOf(".");
   return lastDot > 0 ? fileName.slice(0, lastDot) : fileName;
@@ -94,7 +162,7 @@ function parseFileName(
   const baseName = stripExtension(fileName).trim();
 
   const coreMatch = baseName.match(
-    /^([A-Za-z0-9_-]+)\s*-\s*(AED|QAR)\s+([0-9]+(?:\.[0-9]+)?)(?:\s+Size\s*-\s*(.+))?/i,
+    /^([A-Za-z0-9_-]+)\s*-\s*(AED|QAR)\s+([0-9]+(?:\.[0-9]+)?)(?:\s*\(([^)]+)\))?/i,
   );
 
   if (coreMatch) {
@@ -115,11 +183,7 @@ function parseFileName(
         ? (parseSizes(sizeMatch[1]).filter(
             (size) => size !== "FREE SIZE",
           ) as string[])
-        : coreMatch[4]
-          ? (parseSizes(coreMatch[4]).filter(
-              (size) => size !== "FREE SIZE",
-            ) as string[])
-          : [],
+        : [],
       fabricDetail,
       mainFabric: fabricDetail ? getMainFabric(fabricDetail) : "",
       needsManualInfo: false,
@@ -188,6 +252,14 @@ export async function POST(request: Request) {
     const formData = await request.formData();
     const file = formData.get("file");
     const allowSkuOnly = formData.get("allowSkuOnly") === "1";
+    const mainFolder = String(formData.get("mainFolder") || "").trim();
+
+    if (!mainFolder) {
+      return NextResponse.json(
+        { success: false, message: "Main folder name is required" },
+        { status: 400 },
+      );
+    }
 
     if (!(file instanceof File)) {
       return NextResponse.json(
@@ -232,9 +304,11 @@ export async function POST(request: Request) {
 
     const { client, bucketName, publicUrl } = getConfig();
     const cleanBaseName = stripExtension(safeFileName(file.name));
+    const stockFolder = mainFolder.replace(/^\/+|\/+$/g, "");
+
     const key = parsed.needsManualInfo
-      ? `products/${parsed.sku}/PENDING/${crypto.randomUUID()}-${cleanBaseName}.webp`
-      : `products/${parsed.sku}/${parsed.currency}/` +
+      ? `Stock/${stockFolder}/products/${parsed.sku}/PENDING/${crypto.randomUUID()}-${cleanBaseName}.webp`
+      : `Stock/${stockFolder}/${parsed.sku}/${parsed.currency}/` +
         `${parsed.imageNumber}-${crypto.randomUUID()}-${cleanBaseName}.webp`;
 
     await client.send(
@@ -260,6 +334,8 @@ export async function POST(request: Request) {
     );
 
     const url = `${publicUrl}/${key}`;
+
+    await updateStockIndex(client, bucketName, publicUrl, key, parsed);
 
     // Hugging Face/ONNX cannot load in the Vercel runtime because the native
     // libonnxruntime shared library is unavailable there. Keep uploads working

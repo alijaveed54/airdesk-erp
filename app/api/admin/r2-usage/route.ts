@@ -1,4 +1,5 @@
 import {
+  CopyObjectCommand,
   DeleteObjectsCommand,
   ListObjectsV2Command,
   S3Client,
@@ -483,6 +484,7 @@ export async function GET(request: Request) {
 
     const requestUrl = new URL(request.url);
     const prefix = normalizePrefix(requestUrl.searchParams.get("prefix") || "");
+    const uploadDate = String(requestUrl.searchParams.get("date") || "").trim();
     const config = getR2Config();
     const client = getR2Client(config);
 
@@ -498,7 +500,13 @@ export async function GET(request: Request) {
       }),
     ]);
 
-    const explorer = buildExplorer(objects, prefix);
+    const filteredObjects = uploadDate
+      ? objects.filter((object) =>
+          object.lastModified.slice(0, 10) === uploadDate,
+        )
+      : objects;
+
+    const explorer = buildExplorer(filteredObjects, prefix);
 
     return NextResponse.json({
       success: true,
@@ -531,17 +539,23 @@ export async function DELETE(request: Request) {
     const body = (await request.json()) as {
       key?: string;
       prefix?: string;
+      prefixes?: string[];
       confirm?: string;
     };
 
+    const bulkPrefixes = Array.isArray(body.prefixes)
+      ? body.prefixes.filter(Boolean)
+      : [];
+
     const hasKey = Boolean(String(body.key || "").trim());
     const hasPrefix = Boolean(String(body.prefix || "").trim());
+    const hasBulk = bulkPrefixes.length > 0;
 
-    if (hasKey === hasPrefix) {
+    if ([hasKey, hasPrefix, hasBulk].filter(Boolean).length !== 1) {
       return NextResponse.json(
         {
           success: false,
-          message: "Send exactly one delete target: key or prefix",
+          message: "Send exactly one delete target: key, prefix or prefixes",
         },
         { status: 400 },
       );
@@ -575,6 +589,32 @@ export async function DELETE(request: Request) {
         prefix: parentPrefix,
       });
       keys = candidates.filter((object) => object.key === key);
+    } else if (hasBulk) {
+      const prefixes = bulkPrefixes.map((item) => normalizePrefix(item));
+
+      if (prefixes.some((item) => !item || item === "/")) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "Full bucket deletion is blocked",
+          },
+          { status: 400 },
+        );
+      }
+
+      target = `${prefixes.length} folders`;
+
+      const results = await Promise.all(
+        prefixes.map((prefix) =>
+          listAllObjects({
+            client,
+            bucketName: config.bucketName,
+            prefix,
+          }),
+        ),
+      );
+
+      keys = results.flat();
     } else {
       const prefix = normalizePrefix(body.prefix);
 
@@ -635,6 +675,85 @@ export async function DELETE(request: Request) {
         message:
           known?.message ||
           (error instanceof Error ? error.message : "R2 delete failed"),
+      },
+      { status: known?.status || 500 },
+    );
+  }
+}
+
+
+export async function POST(request: Request) {
+  try {
+    await requireAdmin();
+
+    const body = (await request.json()) as {
+      prefixes?: string[];
+      destination?: string;
+    };
+
+    const prefixes = Array.isArray(body.prefixes)
+      ? body.prefixes.map((item) => normalizePrefix(item))
+      : [];
+
+    const destination = normalizePrefix(body.destination || "");
+
+    if (!prefixes.length || !destination) {
+      return NextResponse.json(
+        { success: false, message: "Source folders and destination are required" },
+        { status: 400 },
+      );
+    }
+
+    const config = getR2Config();
+    const client = getR2Client(config);
+
+    let movedCount = 0;
+
+    for (const prefix of prefixes) {
+      const objects = await listAllObjects({
+        client,
+        bucketName: config.bucketName,
+        prefix,
+      });
+
+      for (const object of objects) {
+        const newKey = `${destination}${object.key.slice(prefix.length)}`;
+
+        await client.send(
+          new CopyObjectCommand({
+            Bucket: config.bucketName,
+            CopySource: `${config.bucketName}/${object.key}`,
+            Key: newKey,
+          }),
+        );
+
+        movedCount++;
+      }
+
+      await client.send(
+        new DeleteObjectsCommand({
+          Bucket: config.bucketName,
+          Delete: {
+            Objects: objects.map((object) => ({ Key: object.key })),
+            Quiet: true,
+          },
+        }),
+      );
+    }
+
+    return NextResponse.json({
+      success: true,
+      movedCount,
+    });
+  } catch (error) {
+    const known = error as { status?: number; message?: string };
+
+    return NextResponse.json(
+      {
+        success: false,
+        message:
+          known?.message ||
+          (error instanceof Error ? error.message : "R2 move failed"),
       },
       { status: known?.status || 500 },
     );

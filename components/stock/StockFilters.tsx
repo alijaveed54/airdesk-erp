@@ -5,14 +5,21 @@ type Props = {
   category: string;
   color: string;
   size: string;
+  fabric: string;
+  minPrice: string;
+  maxPrice: string;
   sort: string;
   categories: string[];
   colors: string[];
   sizes: string[];
+  fabrics: string[];
   onSearchChange: (value: string) => void;
   onCategoryChange: (value: string) => void;
   onColorChange: (value: string) => void;
   onSizeChange: (value: string) => void;
+  onFabricChange: (value: string) => void;
+  onMinPriceChange: (value: string) => void;
+  onMaxPriceChange: (value: string) => void;
   onSortChange: (value: string) => void;
   onReset: () => void;
 };
@@ -41,6 +48,21 @@ export default function StockFilters(props: Props) {
           <Select value={props.category} onChange={props.onCategoryChange} label="All Categories" options={props.categories} />
           <Select value={props.color} onChange={props.onColorChange} label="All Colors" options={props.colors} />
           <Select value={props.size} onChange={props.onSizeChange} label="All Sizes" options={props.sizes} />
+          <Select value={props.fabric || ""} onChange={props.onFabricChange} label="All Fabrics" options={props.fabrics} />
+          <input
+            value={props.minPrice || ""}
+            onChange={(event) => props.onMinPriceChange(event.target.value)}
+            placeholder="Min Price"
+            type="number"
+            className="rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-xs font-semibold outline-none"
+          />
+          <input
+            value={props.maxPrice || ""}
+            onChange={(event) => props.onMaxPriceChange(event.target.value)}
+            placeholder="Max Price"
+            type="number"
+            className="rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-xs font-semibold outline-none"
+          />
           <select
             value={props.sort}
             onChange={(event) => props.onSortChange(event.target.value)}
@@ -75,7 +97,7 @@ function Select({
       className="rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-xs font-semibold outline-none"
     >
       <option value="">{label}</option>
-      {options.map((option) => (
+      {(options || []).map((option) => (
         <option key={option} value={option}>
           {option}
         </option>
