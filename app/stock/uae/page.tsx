@@ -229,6 +229,7 @@ export default function UaePublicStockPage() {
         categories={categories}
         colors={colors}
         sizes={sizes}
+        fabrics={[]}
         onSearchChange={setSearch}
         onCategoryChange={setCategory}
         onColorChange={setColor}

@@ -15,6 +15,9 @@ export default function DohaPublicStockPage() {
   const [category, setCategory] = useState("");
   const [color, setColor] = useState("");
   const [size, setSize] = useState("");
+  const [fabric, setFabric] = useState("");
+  const [minPrice, setMinPrice] = useState("");
+  const [maxPrice, setMaxPrice] = useState("");
   const [sort, setSort] = useState("sku-asc");
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [selectedProduct, setSelectedProduct] = useState<PublicStockProduct | null>(null);
@@ -143,7 +146,9 @@ export default function DohaPublicStockPage() {
 
   const filteredProducts = useMemo(() => {
     const result = availableProducts.filter((product) => {
-      return (
+      const fabrics: string[] = [];
+
+  return (
         (!query || product.sku.toLowerCase().includes(query)) &&
         (!category || product.category === category) &&
         (!color || product.color === color) &&
@@ -164,6 +169,9 @@ export default function DohaPublicStockPage() {
     setCategory("");
     setColor("");
     setSize("");
+    setFabric("");
+    setMinPrice("");
+    setMaxPrice("");
     setSort("sku-asc");
   }
 
@@ -219,14 +227,21 @@ export default function DohaPublicStockPage() {
         category={category}
         color={color}
         size={size}
+        fabric={fabric}
+        minPrice={minPrice}
+        maxPrice={maxPrice}
         sort={sort}
         categories={categories}
         colors={colors}
         sizes={sizes}
+        fabrics={[]}
         onSearchChange={setSearch}
         onCategoryChange={setCategory}
         onColorChange={setColor}
         onSizeChange={setSize}
+        onFabricChange={setFabric}
+        onMinPriceChange={setMinPrice}
+        onMaxPriceChange={setMaxPrice}
         onSortChange={setSort}
         onReset={resetFilters}
       />
