@@ -655,6 +655,7 @@ async function fetchBSBlueRulesByOrderNumbers({
   orderEntryTable,
   orderNoField,
   receivedWhField,
+  receivedUaeField,
   billNoField,
   orderNumbers,
 }: {
@@ -664,6 +665,7 @@ async function fetchBSBlueRulesByOrderNumbers({
   orderEntryTable: SchemaTable;
   orderNoField: string;
   receivedWhField: string;
+  receivedUaeField: string;
   billNoField: string;
   orderNumbers: string[];
 }) {
@@ -725,6 +727,7 @@ async function fetchBSBlueRulesByOrderNumbers({
 
       params.append("fields[]", orderNoField);
       params.append("fields[]", receivedWhField);
+      if (receivedUaeField) params.append("fields[]", receivedUaeField);
       params.append("fields[]", billNoField);
 
       if (offset) params.set("offset", offset);
@@ -767,10 +770,13 @@ async function fetchBSBlueRulesByOrderNumbers({
         const receivedWh = isYesOrCheckedValue(
           fields[receivedWhField]
         );
+        const receivedUae = receivedUaeField
+          ? isYesOrCheckedValue(fields[receivedUaeField])
+          : false;
         const billNumberIsBlank =
           text(fields[billNoField]).trim() === "";
 
-        if (receivedWh && billNumberIsBlank) {
+        if ((receivedWh || receivedUae) && billNumberIsBlank) {
           current.qualified += 1;
         }
 
@@ -849,6 +855,11 @@ async function fetchBSOrderEntrySnapshot({
       "Received In UAE",
       "Received in UAE",
     ]),
+    dispatchedFromIndia: findField(entryFields, [
+      "Dispatched From India",
+      "Dispatched from India",
+      "Dispatched",
+    ]),
     inStock: findField(entryFields, [
       "instock",
       "In Stock",
@@ -913,6 +924,7 @@ async function fetchBSOrderEntrySnapshot({
         orderEntryTable,
         orderNoField: fieldMap.orderNo,
         receivedWhField: fieldMap.receivedWh,
+        receivedUaeField: fieldMap.receivedInUae,
         billNoField: fieldMap.billNo,
         orderNumbers: currentPageRecords.map((record) =>
           text(record.fields?.[config.orderNo]).trim()
@@ -1089,9 +1101,22 @@ async function fetchBSOrderEntrySnapshot({
           continue;
         }
 
-        const received = isYesOrCheckedValue(
+        const receivedDirect = isYesOrCheckedValue(
           fields[fieldMap.receivedInUae]
         );
+
+        const dispatchedFromIndia = fieldMap.dispatchedFromIndia
+          ? isYesOrCheckedValue(fields[fieldMap.dispatchedFromIndia])
+          : false;
+
+        const billNumberIsBlank =
+          text(fields[fieldMap.billNo]).trim() === "";
+
+        // Treat Dispatched From India as Received in UAE
+        // when Bill Number is blank.
+        const received =
+          receivedDirect ||
+          (dispatchedFromIndia && billNumberIsBlank);
 
         if (received) {
           receivedItems += 1;
@@ -1191,10 +1216,13 @@ async function fetchBSOrderEntrySnapshot({
         const receivedWh = isYesOrCheckedValue(
           fields[fieldMap.receivedWh]
         );
+        const receivedUae = fieldMap.receivedInUae
+          ? isYesOrCheckedValue(fields[fieldMap.receivedInUae])
+          : false;
         const billNumberIsBlank =
           text(fields[fieldMap.billNo]).trim() === "";
 
-        return receivedWh && billNumberIsBlank;
+        return (receivedWh || receivedUae) && billNumberIsBlank;
       });
 
       blueRules.set(key, qualified);
@@ -1210,6 +1238,7 @@ async function fetchBSOrderEntrySnapshot({
           orderEntryTable,
           orderNoField: fieldMap.orderNo,
           receivedWhField: fieldMap.receivedWh,
+          receivedUaeField: fieldMap.receivedInUae,
           billNoField: fieldMap.billNo,
           orderNumbers: fallbackOrderNumbers,
         });
@@ -1224,6 +1253,7 @@ async function fetchBSOrderEntrySnapshot({
       {
         orderEntryTable: orderEntryTable.name,
         receivedWhField: fieldMap.receivedWh,
+        receivedUaeField: fieldMap.receivedInUae,
         billNoField: fieldMap.billNo,
       }
     );

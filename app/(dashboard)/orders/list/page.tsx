@@ -151,28 +151,35 @@ function getInStockStatus(order: OrderRecord) {
 
 function isReadyFullInStockOrder(order: OrderRecord) {
   const fields = order.fields as Record<string, unknown>;
-  const itemBasedRule =
-    fields.__allItemsWhYesBillBlank;
+
   const orderStatus =
     String(order.fields.order_status || "")
       .trim()
       .toLowerCase();
+
   const isOrderReceived =
     orderStatus === "order received";
 
-  // BS ITEM BLUE RULE V5:
-  // 1. Every BS Order Entry item has Received in WH 1 = Yes.
-  // 2. Every BS Order Entry item has a blank Bill Number.
-  // 3. The BS Invoice Order Status is exactly Order Received.
-  // BS Invoice.Instock is not required.
-  if (typeof itemBasedRule === "boolean") {
-    return (
-      itemBasedRule &&
-      isOrderReceived
-    );
+  // UPDATED BS READY RULE:
+  // Item is considered ready if available in WH OR Received in UAE.
+  // Bill Number must be blank.
+  // Order Status must be Order Received.
+
+  const updatedRule =
+    fields.__allItemsWhOrUaeReadyBillBlank;
+
+  if (typeof updatedRule === "boolean") {
+    return updatedRule && isOrderReceived;
   }
 
-  // Compatibility fallback for responses from an older API build.
+  // Backward compatibility with old backend rule
+  const oldRule =
+    fields.__allItemsWhYesBillBlank;
+
+  if (typeof oldRule === "boolean") {
+    return oldRule && isOrderReceived;
+  }
+
   const inStockIsFull =
     getInStockStatus(order).toLowerCase() === "full";
 

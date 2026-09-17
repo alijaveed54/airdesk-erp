@@ -274,6 +274,13 @@ export default function Sidebar() {
       icon: ClipboardList,
     },
     {
+      show:
+        isAdmin || Boolean(permission?.canReports),
+      href: "/reports/order-received-pending",
+      label: "Order Received Pending",
+      icon: ClipboardList,
+    },
+    {
       show: isAdmin || Boolean(permission?.canReports),
       href: "/reports/monthly-cod",
       label: "Monthly COD Report",
@@ -512,6 +519,7 @@ export default function Sidebar() {
       "/reports/cod",
       "/reports/pending",
       "/reports/order-pending",
+      "/reports/order-received-pending",
       "/reports/monthly-cod",
     ],
   );

@@ -1,9 +1,5 @@
-import {
-  DeleteObjectCommand,
-  GetObjectCommand,
-  PutObjectCommand,
-  S3Client,
-} from "@aws-sdk/client-s3";
+// Updated manage API - image level id support
+import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { NextResponse } from "next/server";
 
 const s3 = new S3Client({
@@ -19,99 +15,51 @@ const BUCKET = process.env.R2_BUCKET_NAME!;
 const INDEX_KEY = "Stock/stock-index.json";
 
 async function readIndex() {
-  try {
-    const result = await s3.send(
-      new GetObjectCommand({
-        Bucket: BUCKET,
-        Key: INDEX_KEY,
-      }),
-    );
-
-    const text = await result.Body?.transformToString();
-    return text ? JSON.parse(text) : [];
-  } catch {
-    return [];
-  }
+  const result = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: INDEX_KEY }));
+  const text = await result.Body?.transformToString();
+  return text ? JSON.parse(text) : [];
 }
 
-async function saveIndex(items: any[]) {
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: BUCKET,
-      Key: INDEX_KEY,
-      Body: JSON.stringify(items, null, 2),
-      ContentType: "application/json",
-      CacheControl: "public, max-age=300",
-    }),
-  );
+async function saveIndex(items:any[]) {
+  await s3.send(new PutObjectCommand({
+    Bucket: BUCKET,
+    Key: INDEX_KEY,
+    Body: JSON.stringify(items, null, 2),
+    ContentType: "application/json",
+  }));
 }
 
-export async function GET() {
-  const items = await readIndex();
+export async function GET(){
+  const products = await readIndex();
 
-  const images = items.flatMap((item: any) =>
-    (item.images || []).map((url: string) => ({
-  id: item.id,
-  key: url.split(".com/")[1] || "",
-  url,
-  sku: item.sku,
-  size: item.size || "",
-  price: item.price || "",
-  fabric: item.fabric || "",
-}))
-  );
+  const items = products.flatMap((item:any)=>(item.images || []).map((url:string)=>(
+    {
+      id: `${item.id}__${url}`,
+      key: url.split(".com/")[1] || "",
+      url,
+      sku:item.sku,
+      price:item.price || "",
+      size:item.size || "",
+      fabric:item.fabric || ""
+    }
+  )));
 
-  return NextResponse.json({ items: images });
+  return NextResponse.json({items});
 }
 
-export async function PATCH(req: Request) {
-  const body = await req.json();
-  const { id, price, size, fabric } = body;
+export async function PATCH(req:Request){
+  const {id, price, size, fabric}=await req.json();
+  const items=await readIndex();
 
-  const items = await readIndex();
-  const item = items.find((x: any) => x.id === id);
+  const productId=id.split("__")[0];
+  const item=items.find((x:any)=>x.id===productId);
 
-  if (!item) {
-    return NextResponse.json(
-      { success: false, message: "Item not found" },
-      { status: 404 },
-    );
-  }
+  if(!item) return NextResponse.json({success:false},{status:404});
 
-  if (price !== undefined) item.price = Number(price);
-  if (size !== undefined) item.size = size;
-  if (fabric !== undefined) item.fabric = fabric;
+  if(price!==undefined) item.price=Number(price);
+  if(size!==undefined) item.size=size;
+  if(fabric!==undefined) item.fabric=fabric;
 
   await saveIndex(items);
-
-  return NextResponse.json({ success: true });
-}
-
-export async function DELETE(req: Request) {
-  const { key } = await req.json();
-
-  await s3.send(
-    new DeleteObjectCommand({
-      Bucket: BUCKET,
-      Key: key,
-    }),
-  );
-
-  const items = await readIndex();
-
-  const updated = items
-    .map((item: any) => ({
-      ...item,
-      images: (item.images || []).filter(
-        (url: string) => !url.endsWith(key),
-      ),
-      balanceStock: (item.images || []).filter(
-        (url: string) => !url.endsWith(key),
-      ).length,
-    }))
-    .filter((item: any) => item.images.length > 0);
-
-  await saveIndex(updated);
-
-  return NextResponse.json({ success: true });
+  return NextResponse.json({success:true});
 }

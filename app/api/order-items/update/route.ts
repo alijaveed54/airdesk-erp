@@ -412,12 +412,16 @@ export async function PATCH(req: NextRequest) {
         item?.receivedWh !== undefined &&
         isYesValue(item.receivedWh);
 
-      const fields: Record<string, unknown> = {
-        [fieldMap.quantity!.name]: valueForField(
+      const fields: Record<string, unknown> = {};
+
+      // Only update quantity when it is explicitly provided.
+      // Actions like Received In UAE should not overwrite quantity with 0.
+      if (item.quantity !== undefined) {
+        fields[fieldMap.quantity!.name] = valueForField(
           fieldMap.quantity!,
           item.quantity
-        ),
-      };
+        );
+      }
 
       if (fieldMap.supplier && item.supplier !== undefined) {
         fields[fieldMap.supplier.name] = valueForField(
