@@ -376,6 +376,7 @@ export async function POST(request: Request) {
       orderNote,
       replacement,
       returnOrderValue,
+      packing,
       items,
     } = body;
 
@@ -521,6 +522,10 @@ export async function POST(request: Request) {
 
     if (invoiceFieldMap.orderNote) {
       invoiceFields[invoiceFieldMap.orderNote] = orderNote || "";
+    }
+
+    if (isBsOrderEntry) {
+      invoiceFields["Packing Video"] = packing ? "Packing Video" : "";
     }
 
     if (invoiceFieldMap.replacement) {

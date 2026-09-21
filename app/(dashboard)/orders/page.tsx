@@ -50,6 +50,7 @@ export default function OrdersPage() {
   }, []);
 
   const [selectedStore, setSelectedStore] = useState("");
+const [packing, setPacking] = useState(false);
 const [replacement, setReplacement] = useState(false);
 const [returnItems, setReturnItems] = useState(1);
 const [returnOrderValue, setReturnOrderValue] = useState(0);
@@ -80,6 +81,7 @@ async function handleSaveOrder() {
       },
       body: JSON.stringify({
         customerId: selectedCustomer?.id,
+        packing,
         ...(!isI5qDqBase(selectedBaseName) ? { selectedStore } : {}),
 
         discount: orderSummary.discount,
@@ -222,6 +224,16 @@ function getOrderEntryTitle(baseName: string) {
   }
 
   return `${baseName.trim()} Order Entry`;
+}
+
+function isBsBase(baseName: string) {
+  const name = baseName.trim().toLowerCase();
+
+  return (
+    name === "bs" ||
+    name.startsWith("bs ") ||
+    name.includes("bs base")
+  );
 }
 
 function isI5qDqBase(baseName: string) {
@@ -562,6 +574,20 @@ function printInvoice() {
     </p>
   </div>
 )}
+          {isBsBase(selectedBaseName) && (
+            <div className="rounded-3xl border bg-white p-5 shadow-sm">
+              <label className="flex items-center gap-3 font-bold text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={packing}
+                  onChange={(e) => setPacking(e.target.checked)}
+                  className="h-5 w-5"
+                />
+                Packing
+              </label>
+            </div>
+          )}
+
           <ProductSearch
             items={orderItems}
             onChange={setOrderItems}
