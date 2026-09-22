@@ -578,57 +578,48 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const requireReady = body?.requireReady === true;
-    let processOrderNos = orderNos;
-    let skippedOrderNos: string[] = [];
+    // Only rule: Order Status must be Order Received.
+    // All previous Ready-to-Process / stock / supplier rules are ignored.
+    const processOrderNos = orderNos;
+    const skippedOrderNos: string[] = [];
 
-    if (requireReady) {
-      const readySnapshot = await buildReadySnapshot(airtable.token);
-      const readyOrderNos = new Set(
-        readySnapshot.orders.map((order) =>
-          order.orderNo.trim().toLowerCase(),
-        ),
-      );
+    // Find BS Invoice records using normalized order number matching.
+    // Handles values like BUS26661 vs 26661 and extra spaces.
+    const invoiceParams = new URLSearchParams();
+    invoiceParams.set("pageSize", "100");
+    invoiceParams.append("fields[]", BS_INVOICE_ORDER_FIELD);
 
-      processOrderNos = orderNos.filter((orderNo) =>
-        readyOrderNos.has(orderNo.trim().toLowerCase()),
-      );
-      skippedOrderNos = orderNos.filter(
-        (orderNo) => !readyOrderNos.has(orderNo.trim().toLowerCase()),
-      );
-
-      if (processOrderNos.length === 0) {
-        return NextResponse.json(
-          {
-            success: false,
-            code: "NO_READY_ORDERS",
-            message:
-              "Selected order(s) current Ready-to-Process rule pass nahi karte.",
-            processedOrderNos: [],
-            skippedOrderNos,
-          },
-          { status: 400 },
-        );
-      }
-    }
-
-    const conditions = processOrderNos.map(
-      (orderNo) => `{${BS_INVOICE_ORDER_FIELD}}='${escapeAirtableText(orderNo)}'`,
-    );
-
-    const params = new URLSearchParams();
-    params.set("pageSize", "100");
-    params.set(
-      "filterByFormula",
-      conditions.length === 1 ? conditions[0] : `OR(${conditions.join(",")})`,
-    );
-    params.append("fields[]", BS_INVOICE_ORDER_FIELD);
-
-    const invoiceRecords = await airtablePaginatedFetch({
+    const allInvoiceRecords = await airtablePaginatedFetch({
       baseId: BS_BASE_ID,
       token: airtable.token,
       table: BS_INVOICE_TABLE,
-      params,
+      params: invoiceParams,
+    });
+
+    const normalizeOrderNo = (value: unknown) =>
+      cleanText(value)
+        .replace(/\s+/g, "")
+        .toLowerCase();
+
+    const selectedNormalized = new Set(
+      processOrderNos.map((orderNo) => {
+        const clean = normalizeOrderNo(orderNo);
+        const numeric = clean.replace(/\D/g, "");
+        return [clean, numeric];
+      }).flat()
+    );
+
+    const invoiceRecords = allInvoiceRecords.filter((record: any) => {
+      const raw = normalizeOrderNo(
+        record.fields?.[BS_INVOICE_ORDER_FIELD]
+      );
+
+      const numeric = raw.replace(/\D/g, "");
+
+      return (
+        selectedNormalized.has(raw) ||
+        (numeric && selectedNormalized.has(numeric))
+      );
     });
 
     if (invoiceRecords.length === 0) {
@@ -662,7 +653,7 @@ export async function POST(request: NextRequest) {
       message:
         `${updates.length} order${updates.length === 1 ? "" : "s"} sent to Processing` +
         (skippedOrderNos.length > 0
-          ? `; ${skippedOrderNos.length} selected order${skippedOrderNos.length === 1 ? "" : "s"} skipped because they are not Ready to Process`
+          ? `; ${skippedOrderNos.length} selected order${skippedOrderNos.length === 1 ? "" : "s"} skipped`
           : ""),
       processedOrderNos: invoiceRecords.map((record: any) =>
         cleanText(record.fields?.[BS_INVOICE_ORDER_FIELD]),

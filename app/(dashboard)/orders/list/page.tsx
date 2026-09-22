@@ -783,6 +783,69 @@ export default function OrdersListPage() {
     }
   }
 
+
+  async function bulkMoveOrdersToFabStock() {
+    if (selectedRows.length === 0) {
+      alert("Please select at least one order.");
+      return;
+    }
+
+    const selectedOrders = orders
+      .filter((order) => selectedRows.includes(order.id))
+      .map((order) => ({
+        orderId: order.id,
+        orderNo: getOrderNo(order),
+        sourceTable: String(
+          (order.fields as Record<string, unknown>).__tableName || ""
+        ),
+      }));
+
+    if (
+      !confirm(
+        `Move ${selectedOrders.length} selected orders to FAB Doha Stock?`
+      )
+    ) {
+      return;
+    }
+
+    setBulkSaving(true);
+
+    try {
+      const response = await fetch("/api/orders/move-to-fab-stock", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          orders: selectedOrders,
+        }),
+      });
+
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok || !data?.success) {
+        alert(data?.message || "Bulk shift to FAB Stock failed");
+        return;
+      }
+
+      setMovedOrderIds((previous) => [
+        ...previous,
+        ...selectedOrders.map((item) => item.orderId),
+      ]);
+
+      setSelectedRows([]);
+
+      alert(
+        data.message ||
+          `${selectedOrders.length} orders moved to FAB Doha Stock successfully`
+      );
+    } catch {
+      alert("Bulk shift to FAB Stock failed");
+    } finally {
+      setBulkSaving(false);
+    }
+  }
+
   const isBSOrderEntry = useMemo(() => {
     const normalizedBaseName = baseName.toLowerCase();
 
@@ -1513,6 +1576,18 @@ export default function OrdersListPage() {
               >
                 Update Courier
               </button>
+
+
+              {isFabDohaNonStock && (
+                <button
+                  type="button"
+                  onClick={bulkMoveOrdersToFabStock}
+                  disabled={selectedRows.length === 0 || bulkSaving}
+                  className="h-10 rounded-xl border border-purple-700 bg-purple-600 px-4 text-sm font-black text-white disabled:opacity-50"
+                >
+                  {bulkSaving ? "Shifting..." : "Bulk Shift to FAB Stock"}
+                </button>
+              )}
 
               {isBSOrderEntry && (
                 <>
