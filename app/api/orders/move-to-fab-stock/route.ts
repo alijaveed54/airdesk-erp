@@ -1543,12 +1543,7 @@ export async function POST(
 
 
 
-        results.push(
-          {
-            success:true,
-            ...result,
-          }
-        );
+        results.push(result);
 
 
       } catch(error) {
