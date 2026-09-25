@@ -44,7 +44,8 @@ export function proxy(request: NextRequest) {
     pathname.startsWith("/stock/uae") ||
     pathname.startsWith("/api/public/stock/uae") ||
     pathname === "/gallery" ||
-    pathname.startsWith("/api/public/r2/gallery")
+    pathname.startsWith("/api/public/r2/gallery") ||
+    pathname.startsWith("/api/green-api/webhook")
   ) {
     return NextResponse.next();
   }
@@ -190,6 +191,6 @@ export function proxy(request: NextRequest) {
 
 export const config = {
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|api/facebook/post/direct|api/facebook/batch/process).*)",
+    "/((?!_next/static|_next/image|favicon.ico|api/facebook/post/direct|api/facebook/batch/process|api/green-api/webhook).*)",
   ],
 };
