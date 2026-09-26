@@ -242,7 +242,6 @@ export function handleApiError(error: any, fallbackMessage = "Request failed") {
   );
 }
 
-
 type CustomerFieldMap = {
   contact: string;
   name: string;
@@ -269,7 +268,6 @@ function firstMatchingField(
 
   return "";
 }
-
 
 export type InvoiceFieldMap = {
   number: string;
@@ -837,3 +835,53 @@ export async function createProduct(input: {
   return normalizeProductRecord(record, map);
 }
 
+// ==========================================
+// WhatsApp Bot Helpers (Direct Server Access)
+// ==========================================
+
+export async function findInvoiceRecord(
+  baseId: string,
+  token: string,
+  tableName: string,
+  searchQuery: string
+) {
+  const map = await getInvoiceFieldMap(baseId, token, tableName);
+  const safeQuery = escapeAirtableString(searchQuery.trim());
+
+  const formula = `LOWER({${map.number}} & '') = LOWER('${safeQuery}')`;
+  const params = new URLSearchParams();
+  params.set("filterByFormula", formula);
+  params.set("maxRecords", "1");
+
+  const data = await airtableFetch({
+    baseId,
+    token,
+    table: tableName,
+    params,
+  });
+
+  const record = data.records?.[0] || null;
+  return { record, map };
+}
+
+export async function updateInvoiceStatus(
+  baseId: string,
+  token: string,
+  tableName: string,
+  recordId: string,
+  statusFieldName: string,
+  newStatus: string
+) {
+  return airtableFetch({
+    baseId,
+    token,
+    table: tableName,
+    recordId,
+    method: "PATCH",
+    fields: {
+      fields: {
+        [statusFieldName]: newStatus.trim(),
+      },
+    },
+  });
+}
