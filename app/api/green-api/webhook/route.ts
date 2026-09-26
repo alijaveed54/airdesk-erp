@@ -5,11 +5,15 @@ const API_TOKEN_INSTANCE = (process.env.GREEN_API_TOKEN_INSTANCE || "").trim();
 
 async function sendWhatsAppMessage(chatId: string, message: string) {
   if (!ID_INSTANCE || !API_TOKEN_INSTANCE) {
-    console.error("Missing Green API credentials in environment variables.");
-    return;
+    console.error("DEBUG: Credentials missing in env variables!", {
+      idLength: ID_INSTANCE.length,
+      tokenLength: API_TOKEN_INSTANCE.length,
+    });
+    return null;
   }
 
   const url = `https://api.green-api.com/waInstance${ID_INSTANCE}/sendMessage/${API_TOKEN_INSTANCE}`;
+  console.log("DEBUG: Calling Green API URL ->", url);
 
   try {
     const res = await fetch(url, {
@@ -22,13 +26,14 @@ async function sendWhatsAppMessage(chatId: string, message: string) {
     });
 
     const data = await res.json().catch(() => null);
-    console.log("Send message response:", data);
+    console.log("DEBUG: Green API sendMessage response ->", data);
+    return data;
   } catch (error) {
-    console.error("Error sending WhatsApp reply:", error);
+    console.error("DEBUG: Error sending WhatsApp reply ->", error);
+    return null;
   }
 }
 
-// Browser check ke liye GET route
 export async function GET() {
   return NextResponse.json({
     status: "active",
@@ -43,12 +48,13 @@ export async function POST(request: Request) {
     const webhookType = body?.typeWebhook;
     const typeMessage = body?.messageData?.typeMessage;
 
-    // 1. Faltu status webhooks (delivered, read ticks waghera) ko foran khatam karein taake Vercel limits zaya na hon
+    // 1. Status notifications ko drop karein taake Vercel limits zaya na hon
     const isValidEvent =
       webhookType === "incomingMessageReceived" ||
       webhookType === "outgoingMessageReceived";
 
     if (!isValidEvent || typeMessage !== "textMessage") {
+      console.log("DEBUG: Dropped non-message event ->", { webhookType, typeMessage });
       return NextResponse.json({ status: "ignored_non_target_event" });
     }
 
@@ -57,35 +63,60 @@ export async function POST(request: Request) {
       return NextResponse.json({ status: "ignored_api_outgoing" });
     }
 
-    const senderChatId =
-      body?.senderData?.chatId || body?.senderData?.sender;
-    const incomingText =
-      body?.messageData?.textMessageData?.textMessage?.trim() || "";
+    // Chat ID aur text extract karein (Phone aur Web dono formats handle)
+    const rawChatId =
+      body?.senderData?.chatId ||
+      body?.senderData?.sender ||
+      body?.senderData?.senderContactId ||
+      body?.instanceData?.wid ||
+      "";
 
-    // 3. Sirf aapke number ke sath process karein
-    if (senderChatId === "923097979959@c.us") {
-      // Agar bot ka apna bheja hua menu message wapas aaye to ignore karein
-      if (incomingText.startsWith("Assalam-o-Alaikum!")) {
-        return NextResponse.json({ status: "ignored_self_echo" });
-      }
+    const incomingText = (
+      body?.messageData?.textMessageData?.textMessage ||
+      body?.messageData?.extendedTextMessageData?.text ||
+      ""
+    ).trim();
 
-      console.log(`Processing text from ${senderChatId}: ${incomingText}`);
+    console.log("DEBUG: Webhook parsed ->", {
+      webhookType,
+      rawChatId,
+      incomingText,
+    });
 
-      const replyText =
-        `Assalam-o-Alaikum!\n` +
-        `Aapka message mil gaya: "${incomingText}"\n\n` +
-        `Airtable Task Menu:\n` +
-        `1️⃣ BS Order Entry\n` +
-        `2️⃣ FAB Doha\n` +
-        `3️⃣ Tatlumput\n\n` +
-        `Base select karne ke liye number likh kar bhejein.`;
-
-      await sendWhatsAppMessage(senderChatId, replyText);
+    // Loop rokna
+    if (incomingText.startsWith("Assalam-o-Alaikum!")) {
+      return NextResponse.json({ status: "ignored_self_echo" });
     }
 
-    return NextResponse.json({ status: "success" });
+    // Number check: Agar rawChatId mein 923097979959 maujood ho
+    const isAuthorized =
+      rawChatId.includes("923097979959") || rawChatId === "923097979959@c.us";
+
+    if (!isAuthorized) {
+      console.log("DEBUG: Unauthorized sender ->", rawChatId);
+      return NextResponse.json({ status: "unauthorized_user", rawChatId });
+    }
+
+    const replyTarget = rawChatId.includes("@") ? rawChatId : `${rawChatId}@c.us`;
+
+    const replyText =
+      `Assalam-o-Alaikum!\n` +
+      `Aapka message mil gaya: "${incomingText}"\n\n` +
+      `Airtable Task Menu:\n` +
+      `1️⃣ BS Order Entry\n` +
+      `2️⃣ FAB Doha\n` +
+      `3️⃣ Tatlumput\n\n` +
+      `Base select karne ke liye number likh kar bhejein.`;
+
+    const apiResponse = await sendWhatsAppMessage(replyTarget, replyText);
+
+    return NextResponse.json({
+      status: "success",
+      replyTarget,
+      apiResponse,
+    });
   } catch (error) {
-    console.error("Webhook execution failed:", error);
+    console.error("DEBUG: Webhook execution failed ->", error);
     return NextResponse.json({ error: "Failed" }, { status: 500 });
   }
 }
