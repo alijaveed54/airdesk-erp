@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   LayoutDashboard,
   ShoppingBag,
@@ -26,6 +26,8 @@ import {
   MessageCircle,
   Database,
   Clock,
+  Pin,
+  PinOff,
 } from "lucide-react";
 
 type Session = {
@@ -42,6 +44,55 @@ export default function Sidebar() {
   const [inventoryOpen, setInventoryOpen] = useState(false);
   const [facebookOpen, setFacebookOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+
+  // Pin state: Agar true ho to hover par band nahi hoga, permanently open rahega
+  const [isPinned, setIsPinned] = useState(false);
+  // Hovered state: Mouse andar hai ya bahar
+  const [isHovered, setIsHovered] = useState(false);
+
+  const leaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Sidebar tabhi collapsed hoga jab pin na ho aur mouse bhi upar na ho
+  const isCollapsed = !isPinned && !isHovered;
+
+  useEffect(() => {
+    const savedPin = localStorage.getItem("sidebar_pinned");
+    if (savedPin !== null) {
+      setIsPinned(savedPin === "true");
+    }
+  }, []);
+
+  // Jab bhi collapse state change ho, page layout ko notify karein
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      window.dispatchEvent(
+        new CustomEvent("sidebar_toggle", { detail: { collapsed: isCollapsed } })
+      );
+    });
+  }, [isCollapsed]);
+
+  // Mouse andar aane par
+  function handleMouseEnter() {
+    if (leaveTimeoutRef.current) {
+      clearTimeout(leaveTimeoutRef.current);
+    }
+    setIsHovered(true);
+  }
+
+  // Mouse bahar jaane par (150ms delay smooth UX ke liye)
+  function handleMouseLeave() {
+    leaveTimeoutRef.current = setTimeout(() => {
+      setIsHovered(false);
+    }, 150);
+  }
+
+  function togglePin() {
+    setIsPinned((prev) => {
+      const next = !prev;
+      localStorage.setItem("sidebar_pinned", String(next));
+      return next;
+    });
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -88,7 +139,6 @@ export default function Sidebar() {
     if (pathname.startsWith("/facebook")) {
       setFacebookOpen(true);
     }
-
   }, [pathname]);
 
   useEffect(() => {
@@ -119,41 +169,20 @@ export default function Sidebar() {
 
   const permission = session?.permissions?.[0];
 
-  const isAdmin =
-    session?.role === "Admin" || session?.superAdmin;
+  const isAdmin = session?.role === "Admin" || session?.superAdmin;
+  const canInventory = isAdmin || Boolean(permission?.canInventory);
+  const isManager = session?.role === "Manager";
+  const isEmployee = session?.role === "Employee" || session?.role === "Staff";
+  const isEmployeeRole = session?.role === "Employee";
+  const isSupplier = session?.role === "Supplier";
 
-  const canInventory =
-    isAdmin || Boolean(permission?.canInventory);
-
-  const isManager =
-    session?.role === "Manager";
-
-  const isEmployee =
-    session?.role === "Employee" ||
-    session?.role === "Staff";
-
-  const isEmployeeRole =
-    session?.role === "Employee";
-
-  const isSupplier =
-    session?.role === "Supplier";
-
-  const canR2Upload =
-    Boolean(session) && !isSupplier && !isEmployeeRole;
-
-  const canImages =
-    isAdmin || isManager || isEmployee;
-
+  const canR2Upload = Boolean(session) && !isSupplier && !isEmployeeRole;
+  const canImages = isAdmin || isManager || isEmployee;
   const canWhatsAppImport =
     (isAdmin || isManager || isEmployee) && !isEmployeeRole;
-
   const canFacebookPages = isAdmin;
-
-  const canFacebookPost =
-    isAdmin || isManager || isEmployee;
-
-  const canFacebook =
-    canFacebookPages || canFacebookPost;
+  const canFacebookPost = isAdmin || isManager || isEmployee;
+  const canFacebook = canFacebookPages || canFacebookPost;
 
   const nav = [
     {
@@ -225,8 +254,7 @@ export default function Sidebar() {
     {
       show:
         session?.role !== "Supplier" &&
-        (
-          isAdmin ||
+        (isAdmin ||
           Boolean(
             session?.permissions?.some(
               (item: any) =>
@@ -235,8 +263,7 @@ export default function Sidebar() {
                   String(item?.baseId || ""),
                 ),
             ),
-          )
-        ),
+          )),
       href: "/courier/tfm",
       label: "TFM Shipments",
       icon: PackageCheck,
@@ -274,8 +301,7 @@ export default function Sidebar() {
       icon: ClipboardList,
     },
     {
-      show:
-        isAdmin || Boolean(permission?.canReports),
+      show: isAdmin || Boolean(permission?.canReports),
       href: "/reports/order-received-pending",
       label: "Order Received Pending",
       icon: ClipboardList,
@@ -296,28 +322,26 @@ export default function Sidebar() {
       icon: Truck,
     },
     {
-      show:
-        !isEmployeeRole && session?.role !== "Supplier",
+      show: !isEmployeeRole && session?.role !== "Supplier",
       href: "/reports/supplier-bill-dispatch",
       label: "Supplier Bill Dispatch",
       icon: ClipboardList,
     },
     {
-  show:
-    !isEmployeeRole && session?.role !== "Supplier",
-  href: "/reports/supplier-delayed",
-  label: "Supplier Delayed",
-  icon: Clock,
-},
-{
-  show:
-    !isEmployeeRole &&
-    session?.role !== "Supplier" &&
-    (isAdmin || Boolean(permission?.canReports)),
-  href: "/reports/received-in-uae-delay",
-  label: "Received In UAE Delay",
-  icon: Clock,
-},
+      show: !isEmployeeRole && session?.role !== "Supplier",
+      href: "/reports/supplier-delayed",
+      label: "Supplier Delayed",
+      icon: Clock,
+    },
+    {
+      show:
+        !isEmployeeRole &&
+        session?.role !== "Supplier" &&
+        (isAdmin || Boolean(permission?.canReports)),
+      href: "/reports/received-in-uae-delay",
+      label: "Received In UAE Delay",
+      icon: Clock,
+    },
     {
       show:
         !isEmployeeRole &&
@@ -327,35 +351,24 @@ export default function Sidebar() {
       label: "India → UAE Transit",
       icon: Truck,
     },
-
     {
-      show:
-        isAdmin ||
-        isManager ||
-        isEmployee,
+      show: isAdmin || isManager || isEmployee,
       href: "/orders/uae-receiving",
       label: "UAE Receiving",
       icon: PackageCheck,
     },
     {
-      show:
-        isAdmin ||
-        isManager ||
-        isEmployee,
+      show: isAdmin || isManager || isEmployee,
       href: "/reports/doha-receiving",
       label: "Doha Receiving",
       icon: PackageCheck,
     },
     {
-  show:
-    isAdmin ||
-    isManager ||
-    isEmployee,
-  href: "/orders/processing",
-  label: "Processing Orders",
-  icon: PackageCheck,
-},
-    
+      show: isAdmin || isManager || isEmployee,
+      href: "/orders/processing",
+      label: "Processing Orders",
+      icon: PackageCheck,
+    },
   ].filter((item) => item.show);
 
   const bottomNav = [
@@ -365,13 +378,12 @@ export default function Sidebar() {
       label: "Users",
       icon: Users,
     },
-     {
+    {
       show: isAdmin,
       href: "/admin/api-usage",
       label: "API Usage",
       icon: BarChart3,
     },
-
     {
       show: isAdmin,
       href: "/admin/schema",
@@ -407,11 +419,13 @@ export default function Sidebar() {
   function navLinkClass(href: string) {
     const active =
       pathname === href ||
-      (href !== "/dashboard" &&
-        pathname.startsWith(`${href}/`));
+      (href !== "/dashboard" && pathname.startsWith(`${href}/`));
 
     return [
-      "flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-bold transition",
+      "flex items-center rounded-2xl text-sm font-bold transition group relative",
+      isCollapsed
+        ? "justify-center p-3 text-slate-600 hover:bg-emerald-50 hover:text-emerald-700"
+        : "gap-3 px-4 py-3",
       active
         ? "bg-emerald-50 text-emerald-700"
         : "text-slate-600 hover:bg-emerald-50 hover:text-emerald-700",
@@ -434,11 +448,7 @@ export default function Sidebar() {
     ].join(" ");
   }
 
-  // SIDEBAR_SEQUENCE_V2
-  const sortNavItems = (
-    items: typeof nav,
-    order: string[],
-  ) =>
+  const sortNavItems = (items: typeof nav, order: string[]) =>
     [...items].sort((first, second) => {
       const firstIndex = order.indexOf(first.href);
       const secondIndex = order.indexOf(second.href);
@@ -448,9 +458,7 @@ export default function Sidebar() {
       return safeFirst - safeSecond;
     });
 
-  const dashboardNav = nav.filter(
-    (item) => item.href === "/dashboard",
-  );
+  const dashboardNav = nav.filter((item) => item.href === "/dashboard");
 
   const orderNav = sortNavItems(
     nav.filter(
@@ -476,13 +484,13 @@ export default function Sidebar() {
         item.href === "/reports/india-uae-transit",
     ),
     [
-  "/suppliers",
-  "/reports/supplier-activity",
-  "/reports/supplier-bill-dispatch",
-  "/reports/supplier-delayed",
-  "/reports/received-in-uae-delay",
-  "/reports/india-uae-transit",
-],
+      "/suppliers",
+      "/reports/supplier-activity",
+      "/reports/supplier-bill-dispatch",
+      "/reports/supplier-delayed",
+      "/reports/received-in-uae-delay",
+      "/reports/india-uae-transit",
+    ],
   );
 
   const supplierPrimaryNav = supplierNav.filter(
@@ -534,9 +542,7 @@ export default function Sidebar() {
     ].map((item) => item.href),
   );
 
-  const otherNav = nav.filter(
-    (item) => !categorizedHrefs.has(item.href),
-  );
+  const otherNav = nav.filter((item) => !categorizedHrefs.has(item.href));
 
   function renderNavItems(items: typeof nav | typeof bottomNav) {
     return items.map((item) => {
@@ -546,16 +552,21 @@ export default function Sidebar() {
         <Link
           key={item.href}
           href={item.href}
+          title={isCollapsed ? item.label : undefined}
           className={navLinkClass(item.href)}
         >
-          <Icon size={18} />
-          {item.label}
+          <Icon size={18} className="shrink-0" />
+          {!isCollapsed && <span className="truncate">{item.label}</span>}
         </Link>
       );
     });
   }
 
   function renderSectionLabel(label: string) {
+    if (isCollapsed) {
+      return <div className="my-2 border-t border-slate-100" />;
+    }
+
     return (
       <p className="px-4 pt-3 text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">
         {label}
@@ -585,11 +596,15 @@ export default function Sidebar() {
       )}
 
       <aside
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
         className={[
-          "fixed left-0 top-0 z-50 h-screen w-72 overflow-y-auto border-r border-slate-200 bg-white/95 p-4 shadow-2xl backdrop-blur-xl transition-transform duration-300 ease-out lg:z-40 lg:block lg:translate-x-0 lg:bg-white/90 lg:shadow-sm",
-          mobileOpen ? "translate-x-0" : "-translate-x-full",
+          "fixed left-0 top-0 z-50 h-screen overflow-y-auto border-r border-slate-200 bg-white/95 p-3 shadow-2xl backdrop-blur-xl transition-all duration-300 ease-in-out lg:z-40 lg:block lg:bg-white/90 lg:shadow-sm",
+          isCollapsed ? "lg:w-20" : "lg:w-72",
+          mobileOpen ? "w-72 translate-x-0" : "-translate-x-full lg:translate-x-0",
         ].join(" ")}
       >
+        {/* Mobile Close Button */}
         <div className="mb-3 flex justify-end lg:hidden">
           <button
             type="button"
@@ -600,356 +615,406 @@ export default function Sidebar() {
             <X size={20} />
           </button>
         </div>
-      <div className="mb-6 rounded-3xl bg-gradient-to-br from-emerald-600 to-blue-600 p-5 text-white">
-        <div className="flex items-center gap-3">
-          <div className="grid h-11 w-11 place-items-center rounded-2xl bg-white/20">
-            <Sparkles size={22} />
-          </div>
 
-          <div>
-            <h1 className="text-xl font-black">
-              Mysmar ERP
-            </h1>
+        {/* Top Header Card */}
+        <div
+          className={[
+            "relative mb-4 rounded-3xl bg-gradient-to-br from-emerald-600 to-blue-600 text-white transition-all duration-300",
+            isCollapsed ? "p-3" : "p-4",
+          ].join(" ")}
+        >
+          <div
+            className={[
+              "flex items-center",
+              isCollapsed ? "justify-center" : "gap-3",
+            ].join(" ")}
+          >
+            <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-white/20">
+              <Sparkles size={22} />
+            </div>
 
-            <p className="text-xs text-white/80">
-              {session?.role || "Loading..."}
-            </p>
-          </div>
-        </div>
-      </div>
-
-            <nav className="space-y-2">
-        {renderNavItems(dashboardNav)}
-
-        {orderNav.length > 0 && (
-          <>
-            {renderSectionLabel("Orders")}
-            {renderNavItems(orderNav)}
-          </>
-        )}
-
-        {(canInventory || canR2Upload || canImages || isAdmin) && (
-          <>
-            {renderSectionLabel("Inventory & Images")}
-
-            {canInventory && (
-              <div>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setInventoryOpen((current) => !current)
-                  }
-                  className={[
-                    "flex w-full items-center gap-3 rounded-2xl px-4 py-3 text-sm font-bold transition",
-                    pathname.startsWith("/inventory")
-                      ? "bg-emerald-50 text-emerald-700"
-                      : "text-slate-600 hover:bg-emerald-50 hover:text-emerald-700",
-                  ].join(" ")}
-                  aria-expanded={inventoryOpen}
-                >
-                  <Boxes size={18} />
-                  <span className="flex-1 text-left">
-                    Inventory
-                  </span>
-                  <ChevronDown
-                    size={17}
-                    className={`transition-transform ${
-                      inventoryOpen ? "rotate-180" : ""
-                    }`}
-                  />
-                </button>
-
-                {inventoryOpen && (
-                  <div className="ml-5 mt-2 space-y-1 border-l-2 border-slate-200 pl-3">
-                    <Link
-                      href="/inventory/stock-received?type=dq"
-                      className={childLinkClass(
-                        pathname === "/inventory/stock-received" &&
-                          searchParams.get("type") === "dq",
-                        "blue",
-                      )}
-                    >
-                      <span className="h-2 w-2 rounded-full bg-current" />
-                      DQ Stock Receive
-                    </Link>
-
-                    <Link
-                      href="/inventory/stock-received?type=fab-stock"
-                      className={childLinkClass(
-                        pathname === "/inventory/stock-received" &&
-                          searchParams.get("type") === "fab-stock",
-                        "blue",
-                      )}
-                    >
-                      <span className="h-2 w-2 rounded-full bg-current" />
-                      FAB Doha Stock Receive
-                    </Link>
-
-                    <div className="my-2 border-t border-slate-200" />
-
-                    <Link
-                      href="/inventory/list?type=dq"
-                      className={childLinkClass(
-                        pathname === "/inventory/list" &&
-                          searchParams.get("type") === "dq",
-                        "emerald",
-                      )}
-                    >
-                      <span className="h-2 w-2 rounded-full bg-current" />
-                      Inventory List DQ
-                    </Link>
-
-                    <Link
-                      href="/inventory/list?type=fab-stock"
-                      className={childLinkClass(
-                        pathname === "/inventory/list" &&
-                          searchParams.get("type") === "fab-stock",
-                        "emerald",
-                      )}
-                    >
-                      <span className="h-2 w-2 rounded-full bg-current" />
-                      Inventory List FAB
-                    </Link>
-
-                    <div className="my-2 border-t border-slate-200" />
-
-                    <Link
-                      href="/stock/doha"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className={childLinkClass(
-                        pathname === "/stock/doha",
-                        "blue",
-                      )}
-                    >
-                      <span className="h-2 w-2 rounded-full bg-current" />
-                      FAB Doha Public Stock ↗
-                    </Link>
-
-                    <Link
-                      href="/stock/uae"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className={childLinkClass(
-                        pathname === "/stock/uae",
-                        "blue",
-                      )}
-                    >
-                      <span className="h-2 w-2 rounded-full bg-current" />
-                      UAE Public Stock ↗
-                    </Link>
-
-                    <Link
-                      href="/stock/upload"
-                      className={childLinkClass(
-                        pathname === "/stock/upload",
-                        "blue",
-                      )}
-                    >
-                      <span className="h-2 w-2 rounded-full bg-current" />
-                      Stock Image Upload
-                    </Link>
-
-                    <Link
-                      href="/stock/manage"
-                      className={childLinkClass(
-                        pathname === "/stock/manage",
-                        "blue",
-                      )}
-                    >
-                      <span className="h-2 w-2 rounded-full bg-current" />
-                      Stock Manage
-                    </Link>
-                  </div>
-                )}
+            {!isCollapsed && (
+              <div className="min-w-0 flex-1">
+                <h1 className="truncate text-lg font-black leading-tight">
+                  Mysmar ERP
+                </h1>
+                <p className="truncate text-xs text-white/80">
+                  {session?.role || "Loading..."}
+                </p>
               </div>
             )}
+          </div>
+        </div>
 
-            {canR2Upload && (
-              <Link
-                href="/r2/upload"
-                className={navLinkClass("/r2/upload")}
-              >
-                <CloudUpload size={18} />
-                Upload Center
-              </Link>
+        {/* Pin / Unpin Button (Optional Desktop Convenience) */}
+        <div className="mb-3 hidden px-1 lg:block">
+          <button
+            type="button"
+            onClick={togglePin}
+            className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-slate-50 py-1.5 text-[11px] font-bold text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
+            title={isPinned ? "Unpin (Auto hide/show on hover)" : "Pin (Keep expanded)"}
+          >
+            {isPinned ? (
+              <>
+                <PinOff size={14} className="text-emerald-600" />
+                {!isCollapsed && <span>Auto Hide: OFF</span>}
+              </>
+            ) : (
+              <>
+                <Pin size={14} />
+                {!isCollapsed && <span>Auto Hide: ON</span>}
+              </>
             )}
+          </button>
+        </div>
 
-            {canImages && (
-              <Link
-                href="/r2/gallery"
-                className={navLinkClass("/r2/gallery")}
-              >
-                <Images size={18} />
-                Images
-              </Link>
-            )}
+        {/* Navigation Items */}
+        <nav className="space-y-1.5 pb-6">
+          {renderNavItems(dashboardNav)}
 
-            {canImages && (
-              <Link
-                href="/images/product-generator"
-                className={navLinkClass("/images/product-generator")}
-              >
-                <Sparkles size={18} />
-                Product Image Generator
-              </Link>
-            )}
+          {orderNav.length > 0 && (
+            <>
+              {renderSectionLabel("Orders")}
+              {renderNavItems(orderNav)}
+            </>
+          )}
 
-            {isAdmin && (
-              <Link
-                href="/admin/r2-usage"
-                className={navLinkClass("/admin/r2-usage")}
-              >
-                <BarChart3 size={18} />
-                R2 Usage
-              </Link>
-            )}
-          </>
-        )}
+          {(canInventory || canR2Upload || canImages || isAdmin) && (
+            <>
+              {renderSectionLabel("Inventory & Images")}
 
-        {(supplierNav.length > 0 || canWhatsAppImport) && (
-          <>
-            {renderSectionLabel("Suppliers")}
-            {renderNavItems(supplierPrimaryNav)}
+              {canInventory && (
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setInventoryOpen((current) => !current)}
+                    title={isCollapsed ? "Inventory" : undefined}
+                    className={[
+                      "flex w-full items-center rounded-2xl text-sm font-bold transition",
+                      isCollapsed
+                        ? "justify-center p-3 text-slate-600 hover:bg-emerald-50 hover:text-emerald-700"
+                        : "gap-3 px-4 py-3",
+                      pathname.startsWith("/inventory")
+                        ? "bg-emerald-50 text-emerald-700"
+                        : "text-slate-600 hover:bg-emerald-50 hover:text-emerald-700",
+                    ].join(" ")}
+                    aria-expanded={inventoryOpen}
+                  >
+                    <Boxes size={18} className="shrink-0" />
+                    {!isCollapsed && (
+                      <>
+                        <span className="flex-1 text-left">Inventory</span>
+                        <ChevronDown
+                          size={17}
+                          className={`transition-transform ${
+                            inventoryOpen ? "rotate-180" : ""
+                          }`}
+                        />
+                      </>
+                    )}
+                  </button>
 
-            {canWhatsAppImport && (
-              <Link
-                href="/whatsapp/supplier-import"
-                className={navLinkClass("/whatsapp/supplier-import")}
-              >
-                <MessageCircle size={18} />
-                WhatsApp Supplier Import
-              </Link>
-            )}
-
-            {isAdmin && (
-              <Link
-                href="/timelines"
-                className={navLinkClass("/timelines")}
-              >
-                <MessageCircle size={18} />
-                Timelines
-              </Link>
-            )}
-
-            {renderNavItems(supplierReportNav)}
-          </>
-        )}
-
-        {canFacebook && (
-          <>
-            {renderSectionLabel("Facebook")}
-            <div>
-              <button
-                type="button"
-                onClick={() =>
-                  setFacebookOpen((current) => !current)
-                }
-                className={[
-                  "flex w-full items-center gap-3 rounded-2xl px-4 py-3 text-sm font-bold transition",
-                  pathname.startsWith("/facebook")
-                    ? "bg-blue-50 text-blue-700"
-                    : "text-slate-600 hover:bg-blue-50 hover:text-blue-700",
-                ].join(" ")}
-                aria-expanded={facebookOpen}
-              >
-                <Share2 size={18} />
-                <span className="flex-1 text-left">
-                  Facebook
-                </span>
-                <ChevronDown
-                  size={17}
-                  className={`transition-transform ${
-                    facebookOpen ? "rotate-180" : ""
-                  }`}
-                />
-              </button>
-
-              {facebookOpen && (
-                <div className="ml-5 mt-2 space-y-1 border-l-2 border-slate-200 pl-3">
-                  {canFacebookPages && (
-                    <Link
-                      href="/facebook/pages"
-                      className={childLinkClass(
-                        pathname === "/facebook/pages",
-                        "blue",
-                      )}
-                    >
-                      <span className="h-2 w-2 rounded-full bg-current" />
-                      Pages
-                    </Link>
-                  )}
-
-                  {canFacebookPost && (
-                    <>
+                  {inventoryOpen && !isCollapsed && (
+                    <div className="ml-5 mt-2 space-y-1 border-l-2 border-slate-200 pl-3">
                       <Link
-                        href="/facebook/post"
+                        href="/inventory/stock-received?type=dq"
                         className={childLinkClass(
-                          pathname === "/facebook/post",
+                          pathname === "/inventory/stock-received" &&
+                            searchParams.get("type") === "dq",
                           "blue",
                         )}
                       >
                         <span className="h-2 w-2 rounded-full bg-current" />
-                        Create Post
+                        DQ Stock Receive
                       </Link>
 
                       <Link
-                        href="/facebook/batch"
+                        href="/inventory/stock-received?type=fab-stock"
                         className={childLinkClass(
-                          pathname.startsWith("/facebook/batch"),
-                          "blue",
-                        )}
-                      >
-                        <Layers3 size={15} />
-                        Batch Posts
-                      </Link>
-
-                      <Link
-                        href="/facebook/history"
-                        className={childLinkClass(
-                          pathname === "/facebook/history",
+                          pathname === "/inventory/stock-received" &&
+                            searchParams.get("type") === "fab-stock",
                           "blue",
                         )}
                       >
                         <span className="h-2 w-2 rounded-full bg-current" />
-                        History
+                        FAB Doha Stock Receive
                       </Link>
-                    </>
+
+                      <div className="my-2 border-t border-slate-200" />
+
+                      <Link
+                        href="/inventory/list?type=dq"
+                        className={childLinkClass(
+                          pathname === "/inventory/list" &&
+                            searchParams.get("type") === "dq",
+                          "emerald",
+                        )}
+                      >
+                        <span className="h-2 w-2 rounded-full bg-current" />
+                        Inventory List DQ
+                      </Link>
+
+                      <Link
+                        href="/inventory/list?type=fab-stock"
+                        className={childLinkClass(
+                          pathname === "/inventory/list" &&
+                            searchParams.get("type") === "fab-stock",
+                          "emerald",
+                        )}
+                      >
+                        <span className="h-2 w-2 rounded-full bg-current" />
+                        Inventory List FAB
+                      </Link>
+
+                      <div className="my-2 border-t border-slate-200" />
+
+                      <Link
+                        href="/stock/doha"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className={childLinkClass(
+                          pathname === "/stock/doha",
+                          "blue",
+                        )}
+                      >
+                        <span className="h-2 w-2 rounded-full bg-current" />
+                        FAB Doha Public Stock ↗
+                      </Link>
+
+                      <Link
+                        href="/stock/uae"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className={childLinkClass(
+                          pathname === "/stock/uae",
+                          "blue",
+                        )}
+                      >
+                        <span className="h-2 w-2 rounded-full bg-current" />
+                        UAE Public Stock ↗
+                      </Link>
+
+                      <Link
+                        href="/stock/upload"
+                        className={childLinkClass(
+                          pathname === "/stock/upload",
+                          "blue",
+                        )}
+                      >
+                        <span className="h-2 w-2 rounded-full bg-current" />
+                        Stock Image Upload
+                      </Link>
+
+                      <Link
+                        href="/stock/manage"
+                        className={childLinkClass(
+                          pathname === "/stock/manage",
+                          "blue",
+                        )}
+                      >
+                        <span className="h-2 w-2 rounded-full bg-current" />
+                        Stock Manage
+                      </Link>
+                    </div>
                   )}
                 </div>
               )}
-            </div>
-          </>
-        )}
 
-        {courierNav.length > 0 && (
-          <>
-            {renderSectionLabel("Couriers")}
-            {renderNavItems(courierNav)}
-          </>
-        )}
+              {canR2Upload && (
+                <Link
+                  href="/r2/upload"
+                  title={isCollapsed ? "Upload Center" : undefined}
+                  className={navLinkClass("/r2/upload")}
+                >
+                  <CloudUpload size={18} className="shrink-0" />
+                  {!isCollapsed && <span>Upload Center</span>}
+                </Link>
+              )}
 
-        {reportNav.length > 0 && (
-          <>
-            {renderSectionLabel("Reports")}
-            {renderNavItems(reportNav)}
-          </>
-        )}
+              {canImages && (
+                <Link
+                  href="/r2/gallery"
+                  title={isCollapsed ? "Images" : undefined}
+                  className={navLinkClass("/r2/gallery")}
+                >
+                  <Images size={18} className="shrink-0" />
+                  {!isCollapsed && <span>Images</span>}
+                </Link>
+              )}
 
-        {otherNav.length > 0 && (
-          <>
-            {renderSectionLabel("Other")}
-            {renderNavItems(otherNav)}
-          </>
-        )}
+              {canImages && (
+                <Link
+                  href="/images/product-generator"
+                  title={isCollapsed ? "Product Image Generator" : undefined}
+                  className={navLinkClass("/images/product-generator")}
+                >
+                  <Sparkles size={18} className="shrink-0" />
+                  {!isCollapsed && <span>Product Image Generator</span>}
+                </Link>
+              )}
 
-        {bottomNav.length > 0 && (
-          <>
-            {renderSectionLabel("Administration")}
-            {renderNavItems(bottomNav)}
-          </>
-        )}
-      </nav>
+              {isAdmin && (
+                <Link
+                  href="/admin/r2-usage"
+                  title={isCollapsed ? "R2 Usage" : undefined}
+                  className={navLinkClass("/admin/r2-usage")}
+                >
+                  <BarChart3 size={18} className="shrink-0" />
+                  {!isCollapsed && <span>R2 Usage</span>}
+                </Link>
+              )}
+            </>
+          )}
+
+          {(supplierNav.length > 0 || canWhatsAppImport) && (
+            <>
+              {renderSectionLabel("Suppliers")}
+              {renderNavItems(supplierPrimaryNav)}
+
+              {canWhatsAppImport && (
+                <Link
+                  href="/whatsapp/supplier-import"
+                  title={isCollapsed ? "WhatsApp Supplier Import" : undefined}
+                  className={navLinkClass("/whatsapp/supplier-import")}
+                >
+                  <MessageCircle size={18} className="shrink-0" />
+                  {!isCollapsed && <span>WhatsApp Supplier Import</span>}
+                </Link>
+              )}
+
+              {isAdmin && (
+                <Link
+                  href="/timelines"
+                  title={isCollapsed ? "Timelines" : undefined}
+                  className={navLinkClass("/timelines")}
+                >
+                  <MessageCircle size={18} className="shrink-0" />
+                  {!isCollapsed && <span>Timelines</span>}
+                </Link>
+              )}
+
+              {renderNavItems(supplierReportNav)}
+            </>
+          )}
+
+          {canFacebook && (
+            <>
+              {renderSectionLabel("Facebook")}
+              <div>
+                <button
+                  type="button"
+                  onClick={() => setFacebookOpen((current) => !current)}
+                  title={isCollapsed ? "Facebook" : undefined}
+                  className={[
+                    "flex w-full items-center rounded-2xl text-sm font-bold transition",
+                    isCollapsed
+                      ? "justify-center p-3 text-slate-600 hover:bg-blue-50 hover:text-blue-700"
+                      : "gap-3 px-4 py-3",
+                    pathname.startsWith("/facebook")
+                      ? "bg-blue-50 text-blue-700"
+                      : "text-slate-600 hover:bg-blue-50 hover:text-blue-700",
+                  ].join(" ")}
+                  aria-expanded={facebookOpen}
+                >
+                  <Share2 size={18} className="shrink-0" />
+                  {!isCollapsed && (
+                    <>
+                      <span className="flex-1 text-left">Facebook</span>
+                      <ChevronDown
+                        size={17}
+                        className={`transition-transform ${
+                          facebookOpen ? "rotate-180" : ""
+                        }`}
+                      />
+                    </>
+                  )}
+                </button>
+
+                {facebookOpen && !isCollapsed && (
+                  <div className="ml-5 mt-2 space-y-1 border-l-2 border-slate-200 pl-3">
+                    {canFacebookPages && (
+                      <Link
+                        href="/facebook/pages"
+                        className={childLinkClass(
+                          pathname === "/facebook/pages",
+                          "blue",
+                        )}
+                      >
+                        <span className="h-2 w-2 rounded-full bg-current" />
+                        Pages
+                      </Link>
+                    )}
+
+                    {canFacebookPost && (
+                      <>
+                        <Link
+                          href="/facebook/post"
+                          className={childLinkClass(
+                            pathname === "/facebook/post",
+                            "blue",
+                          )}
+                        >
+                          <span className="h-2 w-2 rounded-full bg-current" />
+                            Create Post
+                        </Link>
+
+                        <Link
+                          href="/facebook/batch"
+                          className={childLinkClass(
+                            pathname.startsWith("/facebook/batch"),
+                            "blue",
+                          )}
+                        >
+                          <Layers3 size={15} />
+                          Batch Posts
+                        </Link>
+
+                        <Link
+                          href="/facebook/history"
+                          className={childLinkClass(
+                            pathname === "/facebook/history",
+                            "blue",
+                          )}
+                        >
+                          <span className="h-2 w-2 rounded-full bg-current" />
+                          History
+                        </Link>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
+          {courierNav.length > 0 && (
+            <>
+              {renderSectionLabel("Couriers")}
+              {renderNavItems(courierNav)}
+            </>
+          )}
+
+          {reportNav.length > 0 && (
+            <>
+              {renderSectionLabel("Reports")}
+              {renderNavItems(reportNav)}
+            </>
+          )}
+
+          {otherNav.length > 0 && (
+            <>
+              {renderSectionLabel("Other")}
+              {renderNavItems(otherNav)}
+            </>
+          )}
+
+          {bottomNav.length > 0 && (
+            <>
+              {renderSectionLabel("Administration")}
+              {renderNavItems(bottomNav)}
+            </>
+          )}
+        </nav>
       </aside>
     </>
   );
