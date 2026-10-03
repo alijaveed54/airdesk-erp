@@ -42,6 +42,7 @@ type TableConfig = {
   shipping: string;
   discount: string;
   instock: string;
+  movedToFabStock: string;
   currency: "AED" | "QAR";
   source: string;
 };
@@ -127,7 +128,6 @@ function exactFormula(fieldName: string, value: string) {
   )}')`;
 }
 
-
 function isBSBaseName(baseName: string) {
   const normalized = String(baseName || "")
     .trim()
@@ -180,7 +180,8 @@ function isYesOrCheckedValue(value: unknown) {
       item === "yes" ||
       item === "true" ||
       item === "1" ||
-      item === "checked"
+      item === "checked" ||
+      item === "moved"
   );
 }
 
@@ -464,6 +465,12 @@ function makeConfig(
       "Instock Status",
       "In Stock Status",
     ]),
+    movedToFabStock: findField(fields, [
+      "Moved To FAB Stock",
+      "Moved to FAB Stock",
+      "Transferred To FAB Stock",
+      "Added To FAB Stock",
+    ]),
     currency: isQatar ? "QAR" : "AED",
     source:
       table.name === "DQ Invoice"
@@ -617,11 +624,6 @@ async function fetchTablePage({
   };
 }
 
-
-// BS ORDER ENTRY SNAPSHOT OPT V1
-// One shared BS Order Entry read now powers BOTH Ready-to-Process row formatting
-// and the blue IN STOCK FULL rule. A compatibility fallback only runs for
-// invoice rows whose linked Order Entry items are missing/unavailable.
 function orderNumberKey(value: unknown) {
   return text(value).trim().toLowerCase();
 }
@@ -702,7 +704,6 @@ async function fetchBSBlueRulesByOrderNumbers({
     { total: number; qualified: number }
   >();
 
-  // Keep the proven 20-order formula batch size from the previous blue-rule code.
   for (
     let start = 0;
     start < uniqueOrderNumbers.length;
@@ -915,8 +916,6 @@ async function fetchBSOrderEntrySnapshot({
         return firstRank - secondRank;
       })[0];
 
-  // If the Invoice -> Order Entry link cannot be resolved, preserve the old
-  // blue rule via order-number lookup instead of breaking formatting.
   if (!invoiceEntryLink) {
     if (fieldMap.orderNo && fieldMap.receivedWh && fieldMap.billNo) {
       emptyResult.blueRules = await fetchBSBlueRulesByOrderNumbers({
@@ -935,8 +934,6 @@ async function fetchBSOrderEntrySnapshot({
     return emptyResult;
   }
 
-  // Load Order Received invoices exactly as before so eligible BS orders can
-  // still be promoted to the top even if they are outside the first page.
   const readyInvoiceRecords: any[] = [];
 
   if (config.status) {
@@ -992,11 +989,6 @@ async function fetchBSOrderEntrySnapshot({
     } while (invoiceOffset);
   }
 
-  // IMPORTANT OPTIMIZATION:
-  // Build one union of all linked Order Entry items needed for:
-  //   A) Ready-to-Process summaries/priority records
-  //   B) Blue IN STOCK FULL rule on currently displayed rows
-  // Then fetch each linked Order Entry record only once.
   const relevantInvoiceRecords = uniqueRecordsById([
     ...readyInvoiceRecords,
     ...currentPageRecords,
@@ -1112,8 +1104,6 @@ async function fetchBSOrderEntrySnapshot({
         const billNumberIsBlank =
           text(fields[fieldMap.billNo]).trim() === "";
 
-        // Treat Dispatched From India as Received in UAE
-        // when Bill Number is blank.
         const received =
           receivedDirect ||
           (dispatchedFromIndia && billNumberIsBlank);
@@ -1199,7 +1189,6 @@ async function fetchBSOrderEntrySnapshot({
         invoiceEntryLink.name
       );
 
-      // Preserve previous behavior for unusual/unlinked rows.
       if (
         linkedItemIds.length === 0 ||
         linkedItemIds.some(
@@ -1265,7 +1254,6 @@ async function fetchBSOrderEntrySnapshot({
     blueRules,
   };
 }
-
 
 async function resolveCustomerRecords({
   airtable,
@@ -1432,6 +1420,10 @@ function normalizeRecord(
     ? Number(numericMatch.join(""))
     : 0;
 
+  const isMoved = config.movedToFabStock
+    ? isYesOrCheckedValue(sourceFields[config.movedToFabStock])
+    : false;
+
   return {
     id: record.id,
     fields: {
@@ -1454,6 +1446,8 @@ function normalizeRecord(
       shipping: number(sourceFields[config.shipping]),
       discount: number(sourceFields[config.discount]),
       Instock: text(sourceFields[config.instock]) || "",
+      "Moved To FAB Stock": isMoved,
+      __movedToFabStock: isMoved,
       __allItemsWhYesBillBlank:
         itemBasedBlueRule,
       __currency: config.currency,
@@ -2167,8 +2161,7 @@ export async function PATCH(request: Request) {
     );
   }
 }
-// ADMIN_ORDER_DELETE_V1: The browser button is hidden for non-admin users,
-// and this server-side check prevents direct DELETE requests by non-admins.
+
 type AdminDeleteBody = {
   orderId?: unknown;
   tableName?: unknown;
@@ -2432,4 +2425,3 @@ export async function DELETE(request: Request) {
     return handleApiError(error, "Order delete failed");
   }
 }
-

@@ -54,6 +54,10 @@ function getCourierStatus(order: OrderRecord) {
   const fields = order.fields as Record<string, unknown>;
   const value = fields.__courierStatus;
   const resolved = Array.isArray(value) ? value[0] : value;
+
+  // Direct source from /api/orders/list:
+  // Airtable TFM Status -> __courierStatus -> badge.
+  // No second API call and no Order Status fallback.
   return String(resolved ?? "").trim();
 }
 
@@ -156,6 +160,11 @@ function isReadyFullInStockOrder(order: OrderRecord) {
   const isOrderReceived =
     orderStatus === "order received";
 
+  // UPDATED BS READY RULE:
+  // Item is considered ready if available in WH OR Received in UAE.
+  // Bill Number must be blank.
+  // Order Status must be Order Received.
+
   const updatedRule =
     fields.__allItemsWhOrUaeReadyBillBlank;
 
@@ -163,6 +172,7 @@ function isReadyFullInStockOrder(order: OrderRecord) {
     return updatedRule && isOrderReceived;
   }
 
+  // Backward compatibility with old backend rule
   const oldRule =
     fields.__allItemsWhYesBillBlank;
 
@@ -183,6 +193,7 @@ function isPartialInStockOrder(order: OrderRecord) {
   const inStockStatus = getInStockStatus(order).toLowerCase();
   return inStockStatus === "partial" || inStockStatus === "partially";
 }
+
 
 function getReadyProcessStatus(
   order: OrderRecord
@@ -323,25 +334,6 @@ function getOrderDate(order: OrderRecord) {
   return order.fields.date
     ? new Date(order.fields.date).toLocaleDateString("en-GB")
     : "-";
-}
-
-function isOrderMovedToFabStock(order: OrderRecord, movedOrderIds: string[]): boolean {
-  if (movedOrderIds.includes(order.id)) return true;
-
-  const fields = order.fields as Record<string, unknown>;
-  const val =
-    fields["Moved To FAB Stock"] ??
-    fields["Moved to FAB Stock"] ??
-    fields["Transferred To FAB Stock"] ??
-    fields.__movedToFabStock;
-
-  if (val === true || val === 1) return true;
-
-  const normalized = String(Array.isArray(val) ? val[0] : val ?? "")
-    .trim()
-    .toLowerCase();
-
-  return ["true", "yes", "1", "checked", "moved"].includes(normalized);
 }
 
 const emptyFilters: Filters = {
@@ -747,11 +739,6 @@ export default function OrdersListPage() {
       return;
     }
 
-    if (isOrderMovedToFabStock(order, movedOrderIds)) {
-      alert(`${orderNo} already FAB Stock mein transfer ho chuka hai.`);
-      return;
-    }
-
     if (
       !confirm(
         `Move all items of ${orderNo} to FAB Doha Stock? This action must only be done once.`
@@ -786,35 +773,16 @@ export default function OrdersListPage() {
         previous.includes(order.id) ? previous : [...previous, order.id]
       );
 
-      setOrders((previous) =>
-        previous.map((item) =>
-          item.id === order.id
-            ? {
-                ...item,
-                fields: {
-                  ...item.fields,
-                  "Moved To FAB Stock": true,
-                  __movedToFabStock: true,
-                },
-              }
-            : item
-        )
+      alert(
+        `${orderNo}: ${data.totalQuantity || 0} PCS added to FAB Doha Stock.`
       );
-
-      const addedPcs =
-        data.quantity ??
-        data.totalQuantity ??
-        data.totalQty ??
-        data.count ??
-        0;
-
-      alert(`${orderNo}: ${addedPcs} PCS added to FAB Doha Stock.`);
     } catch {
       alert("Move to FAB Stock failed");
     } finally {
       setMovingOrderId("");
     }
   }
+
 
   const isBSOrderEntry = useMemo(() => {
     const normalizedBaseName = baseName.toLowerCase();
@@ -1184,6 +1152,7 @@ export default function OrdersListPage() {
     }
   }
 
+  // ADMIN_ORDER_DELETE_V1: Admin-only order deletion from Orders List.
   async function deleteOrder(order: OrderRecord) {
     if (!isAdmin) {
       alert("Only Admin can delete orders.");
@@ -1248,7 +1217,6 @@ export default function OrdersListPage() {
       setDeletingOrderId("");
     }
   }
-
   function handlePrint(order: OrderRecord) {
     const payload = {
       orderNo: getOrderNo(order),
@@ -1547,6 +1515,9 @@ export default function OrdersListPage() {
                 Update Courier
               </button>
 
+
+              
+
               {isBSOrderEntry && (
                 <>
                   <button
@@ -1690,363 +1661,354 @@ export default function OrdersListPage() {
                   </thead>
 
                   <tbody>
-                    {displayedOrders.map((order, index) => {
-                      const isMovedToFab = isOrderMovedToFabStock(order, movedOrderIds);
-
-                      return (
-                        <tr
-                          key={order.id}
-                          className={`border-t transition ${
-                            editingOrderId === order.id
-                              ? "border-amber-300 bg-amber-50"
+                    {displayedOrders.map((order, index) => (
+                      <tr
+                        key={order.id}
+                        className={`border-t transition ${
+                          editingOrderId === order.id
+                            ? "border-amber-300 bg-amber-50"
+                            : isBSOrderEntry &&
+                                isReadyFullInStockOrder(order)
+                              ? "border-blue-300 bg-blue-100 hover:bg-blue-200"
                               : isBSOrderEntry &&
-                                  isReadyFullInStockOrder(order)
-                                ? "border-blue-300 bg-blue-100 hover:bg-blue-200"
+                                  getReadyProcessStatus(order) === "green"
+                                ? "border-emerald-300 bg-emerald-100 hover:bg-emerald-200"
                                 : isBSOrderEntry &&
-                                    getReadyProcessStatus(order) === "green"
-                                  ? "border-emerald-300 bg-emerald-100 hover:bg-emerald-200"
-                                  : isBSOrderEntry &&
-                                      getReadyProcessStatus(order) === "orange"
-                                    ? "border-orange-300 bg-orange-100 hover:bg-orange-200"
-                                    : index % 2 === 0
-                                      ? "bg-white hover:bg-blue-50"
-                                      : "bg-slate-50 hover:bg-blue-50"
-                          }`}
-                        >
-                          <td className="px-4 py-3">
-                            {capabilities.canUpdateCourier && !isSupplier && (
-                              <input
-                                type="checkbox"
-                                checked={selectedRows.includes(order.id)}
-                                onChange={() => toggleRow(order.id)}
-                              />
-                            )}
-                          </td>
+                                    getReadyProcessStatus(order) === "orange"
+                                  ? "border-orange-300 bg-orange-100 hover:bg-orange-200"
+                                  : index % 2 === 0
+                                    ? "bg-white hover:bg-blue-50"
+                                    : "bg-slate-50 hover:bg-blue-50"
+                        }`}
+                      >
+                        <td className="px-4 py-3">
+                          {capabilities.canUpdateCourier && !isSupplier && (
+                            <input
+                              type="checkbox"
+                              checked={selectedRows.includes(order.id)}
+                              onChange={() => toggleRow(order.id)}
+                            />
+                          )}
+                        </td>
 
-                          <td className="px-4 py-3 font-black text-slate-900">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span>{getOrderNo(order)}</span>
-                              {getCourierStatus(order) && (
+                        <td className="px-4 py-3 font-black text-slate-900">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span>{getOrderNo(order)}</span>
+                            {getCourierStatus(order) && (
+                              <span
+                                title={`Courier status: ${getCourierStatus(order)}`}
+                                className={`inline-flex rounded-full border px-2 py-1 text-[10px] font-black uppercase ${getCourierStatusBadgeClass(
+                                  getCourierStatus(order)
+                                )}`}
+                              >
+                                {getCourierStatus(order)}
+                              </span>
+                            )}
+                            {isBSOrderEntry &&
+                              isReadyFullInStockOrder(order) && (
+                                <span className="rounded-full bg-blue-600 px-2 py-1 text-[10px] font-black text-white">
+                                  IN STOCK FULL
+                                </span>
+                              )}
+
+                            {isBSOrderEntry &&
+                              !isReadyFullInStockOrder(order) &&
+                              getReadyProcessStatus(order) === "green" && (
                                 <span
-                                  title={`Courier status: ${getCourierStatus(order)}`}
-                                  className={`inline-flex rounded-full border px-2 py-1 text-[10px] font-black uppercase ${getCourierStatusBadgeClass(
-                                    getCourierStatus(order)
-                                  )}`}
+                                  title={getReadyProcessTitle(order)}
+                                  className="rounded-full bg-emerald-600 px-2 py-1 text-[10px] font-black text-white"
                                 >
-                                  {getCourierStatus(order)}
+                                  READY TO PROCESS
                                 </span>
                               )}
-                              {isBSOrderEntry &&
-                                isReadyFullInStockOrder(order) && (
-                                  <span className="rounded-full bg-blue-600 px-2 py-1 text-[10px] font-black text-white">
-                                    IN STOCK FULL
-                                  </span>
-                                )}
 
-                              {isBSOrderEntry &&
-                                !isReadyFullInStockOrder(order) &&
-                                getReadyProcessStatus(order) === "green" && (
-                                  <span
-                                    title={getReadyProcessTitle(order)}
-                                    className="rounded-full bg-emerald-600 px-2 py-1 text-[10px] font-black text-white"
-                                  >
-                                    READY TO PROCESS
-                                  </span>
-                                )}
-
-                              {isBSOrderEntry &&
-                                !isReadyFullInStockOrder(order) &&
-                                getReadyProcessStatus(order) === "orange" && (
-                                  <span
-                                    title={getReadyProcessTitle(order)}
-                                    className="rounded-full bg-orange-600 px-2 py-1 text-[10px] font-black text-white"
-                                  >
-                                    READY — PARTIAL / SOLD OUT
-                                  </span>
-                                )}
-
-                              {isBSOrderEntry &&
-                                !getReadyProcessStatus(order) &&
-                                isPartialInStockOrder(order) && (
-                                  <span className="rounded-full bg-amber-500 px-2 py-1 text-[10px] font-black text-white">
-                                    IN STOCK PARTIAL
-                                  </span>
-                                )}
-
-                              {isBSOrderEntry && isReturnOrder(order) && (
-                                <span className="rounded-full bg-red-600 px-2 py-1 text-[10px] font-black text-white">
-                                  RTS
+                            {isBSOrderEntry &&
+                              !isReadyFullInStockOrder(order) &&
+                              getReadyProcessStatus(order) === "orange" && (
+                                <span
+                                  title={getReadyProcessTitle(order)}
+                                  className="rounded-full bg-orange-600 px-2 py-1 text-[10px] font-black text-white"
+                                >
+                                  READY — PARTIAL / SOLD OUT
                                 </span>
                               )}
-                              {getSource(order) &&
-                                !["BS Invoice", "FAB Invoice", "Invoice"].includes(
-                                  getSource(order)
-                                ) && (
-                                  <span className="rounded-full bg-cyan-100 px-2 py-1 text-[10px] font-black text-cyan-700">
-                                    {getSource(order)}
-                                  </span>
-                                )}
-                            </div>
-                          </td>
 
-                          <td className="px-4 py-3 font-bold text-slate-800">
-                            {getCustomerName(order)}
-                          </td>
-
-                          <td className="px-4 py-3 font-semibold text-slate-600">
-                            {getPhone(order)}
-                          </td>
-
-                          <td className="px-4 py-3 font-semibold text-slate-600">
-                            {getOrderDate(order)}
-                          </td>
-
-                          <td className="px-4 py-3 font-semibold text-slate-700">
-                            {getStore(order)}
-                          </td>
-
-                          <td className="px-4 py-3 font-bold text-slate-700">
-                            {editingOrderId === order.id &&
-                            getRowCapability(
-                              order,
-                              "__canUpdateStatus",
-                              capabilities.canUpdateStatus
-                            ) ? (
-                              <select
-                                value={inlineDraft.status}
-                                onChange={(event) =>
-                                  setInlineDraft((previous) => ({
-                                    ...previous,
-                                    status: event.target.value,
-                                  }))
-                                }
-                                disabled={savingKey === `${order.id}-inline`}
-                                className="h-10 w-full rounded-xl border border-blue-300 bg-white px-3 text-sm font-bold outline-none focus:border-blue-600 disabled:opacity-60"
-                              >
-                                <option value="">Blank</option>
-                                {getRowOptions(
-                                  order,
-                                  "__statusOptions",
-                                  statusOptions
-                                ).map((option) => (
-                                  <option key={option} value={option}>
-                                    {option}
-                                  </option>
-                                ))}
-                              </select>
-                            ) : (
-                              order.fields.order_status ?? "-"
-                            )}
-                          </td>
-
-                          <td className="px-4 py-3 text-right font-black text-slate-900">
-                            {getCurrency(order)} {getTotal(order).toFixed(2)}
-                          </td>
-
-                          <td className="px-4 py-3 font-bold text-slate-700">
-                            {editingOrderId === order.id &&
-                            getRowCapability(
-                              order,
-                              "__canUpdateCourier",
-                              capabilities.canUpdateCourier
-                            ) ? (
-                              <select
-                                value={inlineDraft.courier}
-                                onChange={(event) =>
-                                  setInlineDraft((previous) => ({
-                                    ...previous,
-                                    courier: event.target.value,
-                                  }))
-                                }
-                                disabled={savingKey === `${order.id}-inline`}
-                                className="h-10 w-full rounded-xl border border-blue-300 bg-white px-3 text-sm font-bold outline-none focus:border-blue-600 disabled:opacity-60"
-                              >
-                                <option value="">Blank</option>
-                                {getRowOptions(
-                                  order,
-                                  "__courierOptions",
-                                  courierOptions
-                                ).map((option) => (
-                                  <option key={option} value={option}>
-                                    {option}
-                                  </option>
-                                ))}
-                              </select>
-                            ) : (
-                              order.fields.Courier ?? "-"
-                            )}
-                          </td>
-
-                          <td className="px-4 py-3 text-right">
-                            <div className="flex flex-nowrap justify-end gap-2">
-                              {editingOrderId === order.id ? (
-                                <>
-                                  <button
-                                    type="button"
-                                    onClick={() => saveInlineEdit(order)}
-                                    disabled={savingKey === `${order.id}-inline`}
-                                    title={savingKey === `${order.id}-inline` ? "Saving" : "Save changes"}
-                                    aria-label={savingKey === `${order.id}-inline` ? "Saving changes" : "Save changes"}
-                                    className="flex h-10 w-10 items-center justify-center rounded-xl border border-green-700 bg-green-600 text-lg font-black text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
-                                  >
-                                    {savingKey === `${order.id}-inline` ? "⏳" : "✓"}
-                                  </button>
-
-                                  <button
-                                    type="button"
-                                    onClick={cancelInlineEdit}
-                                    disabled={savingKey === `${order.id}-inline`}
-                                    title="Cancel editing"
-                                    aria-label="Cancel editing"
-                                    className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-300 bg-white text-lg font-black text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
-                                  >
-                                    ✕
-                                  </button>
-                                </>
-                              ) : (
-                                <>
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      router.push(
-                                        `/orders/view/${encodeURIComponent(
-                                          getOrderNo(order)
-                                        )}`
-                                      )
-                                    }
-                                    title="View order"
-                                    aria-label="View order"
-                                    className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-300 bg-white text-lg text-slate-800 hover:bg-slate-100"
-                                  >
-                                    👁
-                                  </button>
-
-                                  {!isSupplier &&
-                                    (getRowCapability(
-                                      order,
-                                      "__canUpdateStatus",
-                                      capabilities.canUpdateStatus
-                                    ) ||
-                                      getRowCapability(
-                                        order,
-                                        "__canUpdateCourier",
-                                        capabilities.canUpdateCourier
-                                      )) && (
-                                    <button
-                                      type="button"
-                                      onClick={() => startInlineEdit(order)}
-                                      disabled={Boolean(savingKey)}
-                                      title="Quick edit"
-                                      aria-label="Quick edit order"
-                                      className="flex h-10 w-10 items-center justify-center rounded-xl border border-amber-400 bg-amber-50 text-lg font-black text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
-                                    >
-                                      ⚡
-                                    </button>
-                                  )}
-
-                                  {isBSOrderEntry && !isSupplier && (
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        void processReadyOrderNumbers(
-                                          [String(getOrderNo(order) || "")],
-                                          order.id,
-                                        )
-                                      }
-                                      disabled={
-                                        processingReadyOrderId === order.id ||
-                                        bulkProcessingReady ||
-                                        Boolean(savingKey)
-                                      }
-                                      title="Apply Ready-to-Process rule; process only if eligible"
-                                      aria-label="Process order if Ready to Process"
-                                      className="flex h-10 w-10 items-center justify-center rounded-xl border border-emerald-700 bg-emerald-600 text-base font-black text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
-                                    >
-                                      {processingReadyOrderId === order.id ? "⏳" : "▶"}
-                                    </button>
-                                  )}
-
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      router.push(`/orders/edit/${encodeURIComponent(getOrderNo(order))}`)
-                                    }
-                                    title="Open full edit"
-                                    aria-label="Open full edit"
-                                    className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-lg font-black text-white hover:bg-blue-700"
-                                  >
-                                    ✏
-                                  </button>
-
-                                  {isAdmin && isFabDohaNonStock && (
-                                    <button
-                                      type="button"
-                                      onClick={() => moveOrderToFabStock(order)}
-                                      disabled={
-                                        movingOrderId === order.id ||
-                                        isMovedToFab
-                                      }
-                                      title={
-                                        isMovedToFab
-                                          ? "Already added to FAB Stock"
-                                          : movingOrderId === order.id
-                                            ? "Adding to FAB Stock..."
-                                            : "Add to FAB Stock"
-                                      }
-                                      aria-label={
-                                        isMovedToFab
-                                          ? "Already added to FAB Stock"
-                                          : movingOrderId === order.id
-                                            ? "Adding to FAB Stock"
-                                            : "Add to FAB Stock"
-                                      }
-                                      className={`flex h-10 w-10 items-center justify-center rounded-xl text-lg font-black transition disabled:cursor-not-allowed ${
-                                        isMovedToFab
-                                          ? "border border-slate-300 bg-slate-200 text-slate-500 opacity-60"
-                                          : "border border-emerald-700 bg-emerald-600 text-white hover:bg-emerald-700"
-                                      }`}
-                                    >
-                                      {isMovedToFab
-                                        ? "✓"
-                                        : movingOrderId === order.id
-                                          ? "⏳"
-                                          : "📦"}
-                                    </button>
-                                  )}
-
-                                  {isAdmin && (
-                                    <button
-                                      type="button"
-                                      onClick={() => deleteOrder(order)}
-                                      disabled={deletingOrderId === order.id || Boolean(savingKey)}
-                                      title={
-                                        deletingOrderId === order.id
-                                          ? "Deleting order"
-                                          : "Delete order"
-                                      }
-                                      aria-label="Delete order"
-                                      className="flex h-10 w-10 items-center justify-center rounded-xl border border-red-700 bg-red-600 text-lg font-black text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
-                                    >
-                                      {deletingOrderId === order.id ? "⏳" : "🗑"}
-                                    </button>
-                                  )}
-
-                                  <button
-                                    type="button"
-                                    onClick={() => handlePrint(order)}
-                                    title="Print order"
-                                    aria-label="Print order"
-                                    className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-900 text-lg font-black text-white hover:bg-slate-800"
-                                  >
-                                    🖨
-                                  </button>
-                                </>
+                            {isBSOrderEntry &&
+                              !getReadyProcessStatus(order) &&
+                              isPartialInStockOrder(order) && (
+                                <span className="rounded-full bg-amber-500 px-2 py-1 text-[10px] font-black text-white">
+                                  IN STOCK PARTIAL
+                                </span>
                               )}
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
+
+                            {isBSOrderEntry && isReturnOrder(order) && (
+                              <span className="rounded-full bg-red-600 px-2 py-1 text-[10px] font-black text-white">
+                                RTS
+                              </span>
+                            )}
+                            {getSource(order) &&
+                              !["BS Invoice", "FAB Invoice", "Invoice"].includes(
+                                getSource(order)
+                              ) && (
+                                <span className="rounded-full bg-cyan-100 px-2 py-1 text-[10px] font-black text-cyan-700">
+                                  {getSource(order)}
+                                </span>
+                              )}
+                          </div>
+                        </td>
+
+                        <td className="px-4 py-3 font-bold text-slate-800">
+                          {getCustomerName(order)}
+                        </td>
+
+                        <td className="px-4 py-3 font-semibold text-slate-600">
+                          {getPhone(order)}
+                        </td>
+
+                        <td className="px-4 py-3 font-semibold text-slate-600">
+                          {getOrderDate(order)}
+                        </td>
+
+                        <td className="px-4 py-3 font-semibold text-slate-700">
+                          {getStore(order)}
+                        </td>
+
+                        <td className="px-4 py-3 font-bold text-slate-700">
+                          {editingOrderId === order.id &&
+                          getRowCapability(
+                            order,
+                            "__canUpdateStatus",
+                            capabilities.canUpdateStatus
+                          ) ? (
+                            <select
+                              value={inlineDraft.status}
+                              onChange={(event) =>
+                                setInlineDraft((previous) => ({
+                                  ...previous,
+                                  status: event.target.value,
+                                }))
+                              }
+                              disabled={savingKey === `${order.id}-inline`}
+                              className="h-10 w-full rounded-xl border border-blue-300 bg-white px-3 text-sm font-bold outline-none focus:border-blue-600 disabled:opacity-60"
+                            >
+                              <option value="">Blank</option>
+                              {getRowOptions(
+                                order,
+                                "__statusOptions",
+                                statusOptions
+                              ).map((option) => (
+                                <option key={option} value={option}>
+                                  {option}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            order.fields.order_status ?? "-"
+                          )}
+                        </td>
+
+                        <td className="px-4 py-3 text-right font-black text-slate-900">
+                          {getCurrency(order)} {getTotal(order).toFixed(2)}
+                        </td>
+
+                        <td className="px-4 py-3 font-bold text-slate-700">
+                          {editingOrderId === order.id &&
+                          getRowCapability(
+                            order,
+                            "__canUpdateCourier",
+                            capabilities.canUpdateCourier
+                          ) ? (
+                            <select
+                              value={inlineDraft.courier}
+                              onChange={(event) =>
+                                setInlineDraft((previous) => ({
+                                  ...previous,
+                                  courier: event.target.value,
+                                }))
+                              }
+                              disabled={savingKey === `${order.id}-inline`}
+                              className="h-10 w-full rounded-xl border border-blue-300 bg-white px-3 text-sm font-bold outline-none focus:border-blue-600 disabled:opacity-60"
+                            >
+                              <option value="">Blank</option>
+                              {getRowOptions(
+                                order,
+                                "__courierOptions",
+                                courierOptions
+                              ).map((option) => (
+                                <option key={option} value={option}>
+                                  {option}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            order.fields.Courier ?? "-"
+                          )}
+                        </td>
+
+                        <td className="px-4 py-3 text-right">
+                          <div className="flex flex-nowrap justify-end gap-2">
+                            {editingOrderId === order.id ? (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => saveInlineEdit(order)}
+                                  disabled={savingKey === `${order.id}-inline`}
+                                  title={savingKey === `${order.id}-inline` ? "Saving" : "Save changes"}
+                                  aria-label={savingKey === `${order.id}-inline` ? "Saving changes" : "Save changes"}
+                                  className="flex h-10 w-10 items-center justify-center rounded-xl border border-green-700 bg-green-600 text-lg font-black text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  {savingKey === `${order.id}-inline` ? "⏳" : "✓"}
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={cancelInlineEdit}
+                                  disabled={savingKey === `${order.id}-inline`}
+                                  title="Cancel editing"
+                                  aria-label="Cancel editing"
+                                  className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-300 bg-white text-lg font-black text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  ✕
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    router.push(
+                                  `/orders/view/${encodeURIComponent(
+                                    getOrderNo(order)
+                                  )}`
+                                )
+                              }
+                              title="View order"
+                              aria-label="View order"
+                              className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-300 bg-white text-lg text-slate-800 hover:bg-slate-100"
+                            >
+                              👁
+                            </button>
+
+                            {!isSupplier &&
+                              (getRowCapability(
+                                order,
+                                "__canUpdateStatus",
+                                capabilities.canUpdateStatus
+                              ) ||
+                                getRowCapability(
+                                  order,
+                                  "__canUpdateCourier",
+                                  capabilities.canUpdateCourier
+                                )) && (
+                              <button
+                                type="button"
+                                onClick={() => startInlineEdit(order)}
+                                disabled={Boolean(savingKey)}
+                                title="Quick edit"
+                                aria-label="Quick edit order"
+                                className="flex h-10 w-10 items-center justify-center rounded-xl border border-amber-400 bg-amber-50 text-lg font-black text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                ⚡
+                              </button>
+                            )}
+
+                            {isBSOrderEntry && !isSupplier && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void processReadyOrderNumbers(
+                                    [String(getOrderNo(order) || "")],
+                                    order.id,
+                                  )
+                                }
+                                disabled={
+                                  processingReadyOrderId === order.id ||
+                                  bulkProcessingReady ||
+                                  Boolean(savingKey)
+                                }
+                                title="Apply Ready-to-Process rule; process only if eligible"
+                                aria-label="Process order if Ready to Process"
+                                className="flex h-10 w-10 items-center justify-center rounded-xl border border-emerald-700 bg-emerald-600 text-base font-black text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                {processingReadyOrderId === order.id ? "⏳" : "▶"}
+                              </button>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() =>
+                                router.push(`/orders/edit/${encodeURIComponent(getOrderNo(order))}`)
+                              }
+                              title="Open full edit"
+                              aria-label="Open full edit"
+                              className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-lg font-black text-white hover:bg-blue-700"
+                            >
+                              ✏
+                            </button>
+
+                            {isAdmin && isFabDohaNonStock && (
+                              <button
+                                type="button"
+                                onClick={() => moveOrderToFabStock(order)}
+                                disabled={
+                                  movingOrderId === order.id ||
+                                  movedOrderIds.includes(order.id)
+                                }
+                                title={
+                                  movedOrderIds.includes(order.id)
+                                    ? "Added to FAB Stock"
+                                    : movingOrderId === order.id
+                                      ? "Adding to FAB Stock"
+                                      : "Add to FAB Stock"
+                                }
+                                aria-label={
+                                  movedOrderIds.includes(order.id)
+                                    ? "Added to FAB Stock"
+                                    : movingOrderId === order.id
+                                      ? "Adding to FAB Stock"
+                                      : "Add to FAB Stock"
+                                }
+                                className="flex h-10 w-10 items-center justify-center rounded-xl border border-emerald-700 bg-emerald-600 text-lg font-black text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                {movedOrderIds.includes(order.id)
+                                  ? "✓"
+                                  : movingOrderId === order.id
+                                    ? "⏳"
+                                    : "📦"}
+                              </button>
+                            )}                            {isAdmin && (
+                              <button
+                                type="button"
+                                onClick={() => deleteOrder(order)}
+                                disabled={deletingOrderId === order.id || Boolean(savingKey)}
+                                title={
+                                  deletingOrderId === order.id
+                                    ? "Deleting order"
+                                    : "Delete order"
+                                }
+                                aria-label="Delete order"
+                                className="flex h-10 w-10 items-center justify-center rounded-xl border border-red-700 bg-red-600 text-lg font-black text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                {deletingOrderId === order.id ? "⏳" : "🗑"}
+                              </button>
+                            )}
+
+
+                            <button
+                              type="button"
+                              onClick={() => handlePrint(order)}
+                              title="Print order"
+                              aria-label="Print order"
+                              className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-900 text-lg font-black text-white hover:bg-slate-800"
+                            >
+                              🖨
+                            </button>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
 
                     {orders.length === 0 && (
                       <tr>

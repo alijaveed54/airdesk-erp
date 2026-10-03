@@ -51,6 +51,7 @@ type ProductBlock = {
   timeText: string;
   timestamp: number | null;
   sender: string;
+  supplier?: string;
   description: string;
   size: string;
   price: string;
@@ -72,10 +73,6 @@ type ParseSummary = {
   review: number;
   mediaMessages: number;
   exactMediaNames: number;
-};
-
-type BrowserFile = File & {
-  webkitRelativePath?: string;
 };
 
 type DirectoryFileHandle = {
@@ -162,17 +159,6 @@ const STRONG_PRODUCT_KEYWORDS = [
 
 const MEDIA_EXTENSIONS = /\.(jpe?g|png|webp|gif|heic|avif|mp4|mov|m4v|pdf)$/i;
 
-function normalizeList(value: string = "") {
-  return Array.from(
-    new Set(
-      value
-        .split(/[\n,;|]+/)
-        .map((item) => item.trim().toUpperCase())
-        .filter(Boolean),
-    ),
-  );
-}
-
 function detectDateOrder(text: string): DateOrder {
   const pattern = /^(\d{1,2})\/(\d{1,2})\/\d{2,4},/gm;
   let match: RegExpExecArray | null;
@@ -227,7 +213,7 @@ function parseDateInputStart(value: string) {
   if (!value) return null;
 
   const parts = value.split("-").map(Number);
-  if (parts.length != 3 || parts.some(Number.isNaN)) return null;
+  if (parts.length !== 3 || parts.some(Number.isNaN)) return null;
 
   const [year, month, day] = parts;
   const timestamp = new Date(year, month - 1, day, 0, 0, 0, 0).getTime();
@@ -356,11 +342,12 @@ function looksLikeProductDescription(body: string) {
   );
 }
 
-function findSupplierCode(body: string, ignoredCodes: string[]) {
+function findSupplierCode(body: string, _ignoredCodes?: string[]) {
   const trimmed = body.trim();
   if (!trimmed || trimmed.length > 80) return "";
 
-  for (const code of []) {
+  const codes: string[] = [];
+  for (const code of codes) {
     const pattern = new RegExp(
       `(^|[^A-Z0-9])${code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^A-Z0-9]|$)`,
       "i",
@@ -372,6 +359,7 @@ function findSupplierCode(body: string, ignoredCodes: string[]) {
 }
 
 type PricePair = {
+  supplier: string;
   price: string;
 };
 
@@ -392,16 +380,16 @@ function normalizePriceNumber(value: string) {
   const cleaned = value.replace(/,/g, "").trim();
   const parsed = Number(cleaned);
   if (!Number.isFinite(parsed)) return "";
-  return Number.isInteger(parsed) ? String(parsed) : String(parsed);
+  return String(parsed);
 }
 
 function extractSupplierPricePairs(
   body: string,
-  []: string[],
+  codes: string[] = [],
 ): PricePair[] {
   const pairs: PricePair[] = [];
 
-  for (const code of []) {
+  for (const code of codes) {
     const escaped = code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const pattern = new RegExp(
       `(?:^|[^A-Z0-9])${escaped}\\s*[:=\\-]?\\s*(?:AED|QAR|MUR|INR|RS\\.?|PKR)?\\s*([0-9]{2,6}(?:\\.[0-9]+)?)(?=$|[^0-9])`,
@@ -421,11 +409,11 @@ function extractSupplierPricePairs(
 
 function extractPrice(
   body: string,
-  preferredSupplier: string,
-  []: string[],
+  preferredSupplier: string = "",
+  codes: string[] = [],
 ) {
   const trimmed = body.trim();
-  const supplierPairs = extractSupplierPricePairs(trimmed, []);
+  const supplierPairs = extractSupplierPricePairs(trimmed, codes);
   const preferred = preferredSupplier.trim().toUpperCase();
 
   if (preferred) {
@@ -500,7 +488,6 @@ function normalizeSizeCandidate(value: string) {
     cleaned.matchAll(/\b(XXXXL|XXXL|XXL|XL|XS|[SML]|[234]XL)\b/gi),
   ).map((match) => normalizeSizeToken(match[1]));
 
-  // User rule: when alphabet and number both exist, alphabet wins.
   if (alphaMatches.length > 0) return formatSizeRange(alphaMatches);
 
   const mappedNumbers = Array.from(cleaned.matchAll(/\b(34|36|38|40|42|44)\b/g))
@@ -522,7 +509,6 @@ function normalizeSizeCandidate(value: string) {
     return mapped;
   }
 
-  // Unsupported sizes such as 46/48 are kept so they can be edited manually.
   return cleaned.slice(0, 70);
 }
 
@@ -982,7 +968,6 @@ export default function WhatsAppSupplierImportPage() {
               );
         const ignoredByDate = messagesAfterSku.length - messages.length;
 
-        const selectedSenderSet = new Set(selectedMySenders);
         const productList: ProductBlock[] = [];
         const skuEvents: Array<{
           messageIndex: number;
@@ -990,11 +975,11 @@ export default function WhatsAppSupplierImportPage() {
           sku: string;
         }> = [];
 
-              let currentProduct: ProductBlock | null = null;
+        let currentProduct: ProductBlock | null = null;
         let pendingMediaRefs: MediaRef[] = [];
         let pendingMediaMessageCount = 0;
         let pendingFirstMessage: ChatMessage | null = null;
-              let pendingPrice = "";
+        let pendingPrice = "";
         let mediaMessages = 0;
         let exactMediaNames = 0;
 
@@ -1002,7 +987,6 @@ export default function WhatsAppSupplierImportPage() {
           pendingMediaRefs = [];
           pendingMediaMessageCount = 0;
           pendingFirstMessage = null;
-          pendingPrice = "";
           pendingPrice = "";
         };
 
@@ -1036,14 +1020,10 @@ export default function WhatsAppSupplierImportPage() {
             continue;
           }
 
-          const supplierPairs = [];
-          const supplierCode = "";
-          const multipleSupplierPrices = supplierPairs.length > 1;
-          const supplierMarker = "";
           const preferredSupplier =
             currentProduct?.supplier && currentProduct.supplier !== "UNASSIGNED"
               ? currentProduct.supplier
-              : pendingPrice || "";
+              : "";
           const detectedPrice = extractPrice(
             body,
             preferredSupplier,
@@ -1072,16 +1052,6 @@ export default function WhatsAppSupplierImportPage() {
             continue;
           }
 
-          if ("") {
-            
-            if (currentProduct) {
-              
-            } else {
-              rememberPendingStart(chatMessage);
-              pendingPrice = "";
-            }
-          }
-
           if (looksLikeProductDescription(body)) {
             const blockStart = pendingFirstMessage || chatMessage;
 
@@ -1093,6 +1063,7 @@ export default function WhatsAppSupplierImportPage() {
               timeText: blockStart.timeText,
               timestamp: blockStart.timestamp,
               sender: chatMessage.sender || "Unknown",
+              supplier: "",
               description: body,
               size: extractProductSize(body),
               price: detectedPrice || pendingPrice,
@@ -1125,23 +1096,18 @@ export default function WhatsAppSupplierImportPage() {
               if (laterFabric) currentProduct.fabric = laterFabric;
             }
 
-            // A separate short price message normally closes one product block.
-            // This allows the next product's images to arrive before its description.
             if (detectedPrice && body.length <= 80) {
               currentProduct = null;
             }
             continue;
           }
 
-          if ("" || detectedPrice) {
+          if (detectedPrice) {
             rememberPendingStart(chatMessage);
-            if ("") pendingPrice = "";
-            if (detectedPrice) pendingPrice = detectedPrice;
+            pendingPrice = detectedPrice;
           }
         }
 
-        // Map SKU replies to nearest previous unassigned product.
-        // Avoid FIFO mismatch caused by media and price messages.
         for (const skuEvent of skuEvents) {
           let candidate: ProductBlock | undefined;
 
@@ -1819,7 +1785,7 @@ export default function WhatsAppSupplierImportPage() {
             </div>
           </div>
 
-          <div className="mt-5 grid gap-3 md:grid-cols-3">
+          <div className="mt-5 grid gap-3 md:grid-cols-2">
             <label className="relative block">
               <Search
                 size={17}
@@ -1828,11 +1794,10 @@ export default function WhatsAppSupplierImportPage() {
               <input
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search SKU, supplier or description"
+                placeholder="Search SKU or description"
                 className="h-11 w-full rounded-xl border border-slate-300 pl-10 pr-3 text-sm font-bold outline-none focus:border-emerald-500"
               />
             </label>
-
 
             <select
               value={statusFilter}
@@ -1866,9 +1831,6 @@ export default function WhatsAppSupplierImportPage() {
                         className={`rounded-full px-3 py-1 text-xs font-black ${confidenceClass(product.confidence)}`}
                       >
                         {product.confidence}
-                      </span>
-                      <span className="rounded-full bg-violet-100 px-3 py-1 text-xs font-black text-violet-800">
-                        {""}
                       </span>
                     </div>
                     <p className="mt-2 text-xs font-bold text-slate-500">
@@ -1912,106 +1874,89 @@ export default function WhatsAppSupplierImportPage() {
                     </span>
                   </summary>
                   <div className="border-t border-slate-100 px-4 pb-4">
-                <div className="mt-4 grid gap-3 lg:grid-cols-3 xl:grid-cols-5">
-                  <label>
-                    <span className="text-[11px] font-black uppercase text-slate-400">
-                      Supplier
-                    </span>
-                    <input
-                      value={""}
-                      onChange={(event) =>
-                        updateProduct(product.id, {
-                          supplier: event.target.value.toUpperCase(),
-                          confidence: "Manual",
-                        })
-                      }
-                      className="mt-1 h-10 w-full rounded-xl border border-slate-300 px-3 text-sm font-black outline-none focus:border-emerald-500"
-                    />
-                  </label>
+                    <div className="mt-4 grid gap-3 lg:grid-cols-2 xl:grid-cols-4">
+                      <label>
+                        <span className="text-[11px] font-black uppercase text-slate-400">
+                          Assigned SKU
+                        </span>
+                        <input
+                          value={product.sku}
+                          onChange={(event) =>
+                            updateProduct(product.id, {
+                              sku: event.target.value.toUpperCase().trim(),
+                              confidence: "Manual",
+                            })
+                          }
+                          onBlur={recalculateSummary}
+                          className="mt-1 h-10 w-full rounded-xl border border-slate-300 px-3 text-sm font-black outline-none focus:border-emerald-500"
+                          placeholder="HRT1234"
+                        />
+                      </label>
 
-                  <label>
-                    <span className="text-[11px] font-black uppercase text-slate-400">
-                      Assigned SKU
-                    </span>
-                    <input
-                      value={product.sku}
-                      onChange={(event) =>
-                        updateProduct(product.id, {
-                          sku: event.target.value.toUpperCase().trim(),
-                          confidence: "Manual",
-                        })
-                      }
-                      onBlur={recalculateSummary}
-                      className="mt-1 h-10 w-full rounded-xl border border-slate-300 px-3 text-sm font-black outline-none focus:border-emerald-500"
-                      placeholder="HRT1234"
-                    />
-                  </label>
+                      <label>
+                        <span className="text-[11px] font-black uppercase text-slate-400">
+                          Size
+                        </span>
+                        <input
+                          value={product.size ?? ""}
+                          onChange={(event) =>
+                            updateProduct(product.id, {
+                              size: event.target.value,
+                            })
+                          }
+                          className="mt-1 h-10 w-full rounded-xl border border-slate-300 px-3 text-sm font-bold outline-none focus:border-emerald-500"
+                          placeholder="XXL (44) / Up to 44"
+                        />
+                      </label>
 
-                  <label>
-                    <span className="text-[11px] font-black uppercase text-slate-400">
-                      Size
-                    </span>
-                    <input
-                      value={product.size ?? ""}
-                      onChange={(event) =>
-                        updateProduct(product.id, {
-                          size: event.target.value,
-                        })
-                      }
-                      className="mt-1 h-10 w-full rounded-xl border border-slate-300 px-3 text-sm font-bold outline-none focus:border-emerald-500"
-                      placeholder="XXL (44) / Up to 44"
-                    />
-                  </label>
+                      <label>
+                        <span className="text-[11px] font-black uppercase text-slate-400">
+                          Price
+                        </span>
+                        <input
+                          value={product.price ?? ""}
+                          onChange={(event) =>
+                            updateProduct(product.id, {
+                              price: event.target.value,
+                            })
+                          }
+                          className="mt-1 h-10 w-full rounded-xl border border-slate-300 px-3 text-sm font-bold outline-none focus:border-emerald-500"
+                        />
+                      </label>
 
-                  <label>
-                    <span className="text-[11px] font-black uppercase text-slate-400">
-                      Price
-                    </span>
-                    <input
-                      value={product.price ?? ""}
-                      onChange={(event) =>
-                        updateProduct(product.id, {
-                          price: event.target.value,
-                        })
-                      }
-                      className="mt-1 h-10 w-full rounded-xl border border-slate-300 px-3 text-sm font-bold outline-none focus:border-emerald-500"
-                    />
-                  </label>
+                      <label>
+                        <span className="text-[11px] font-black uppercase text-slate-400">
+                          Fabric
+                        </span>
+                        <input
+                          value={product.fabric ?? ""}
+                          onChange={(event) =>
+                            updateProduct(product.id, {
+                              fabric: event.target.value,
+                            })
+                          }
+                          onBlur={(event) =>
+                            updateProduct(product.id, {
+                              fabric: normalizeFabric(event.target.value),
+                            })
+                          }
+                          className="mt-1 h-10 w-full rounded-xl border border-slate-300 px-3 text-sm font-bold outline-none focus:border-emerald-500"
+                          placeholder="Crape Silk"
+                        />
+                      </label>
+                    </div>
 
-                  <label>
-                    <span className="text-[11px] font-black uppercase text-slate-400">
-                      Fabric
-                    </span>
-                    <input
-                      value={product.fabric ?? ""}
-                      onChange={(event) =>
-                        updateProduct(product.id, {
-                          fabric: event.target.value,
-                        })
-                      }
-                      onBlur={(event) =>
-                        updateProduct(product.id, {
-                          fabric: normalizeFabric(event.target.value),
-                        })
-                      }
-                      className="mt-1 h-10 w-full rounded-xl border border-slate-300 px-3 text-sm font-bold outline-none focus:border-emerald-500"
-                      placeholder="Crape Silk"
-                    />
-                  </label>
-                </div>
-
-                <div className="mt-3 flex flex-wrap gap-2 text-xs font-black">
-                  <span className="rounded-full bg-blue-50 px-3 py-1 text-blue-700">
-                    Media markers: {product.mediaMessageCount}
-                  </span>
-                  <span className="rounded-full bg-emerald-50 px-3 py-1 text-emerald-700">
-                    Exact files linked: {product.linkedMediaCount}
-                  </span>
-                  <span className="rounded-full bg-slate-50 px-3 py-1 text-slate-600">
-                    Omitted without filename: {product.mediaRefs.filter((item) => item.omitted).length}
-                  </span>
-                </div>
-
+                    <div className="mt-3 flex flex-wrap gap-2 text-xs font-black">
+                      <span className="rounded-full bg-blue-50 px-3 py-1 text-blue-700">
+                        Media markers: {product.mediaMessageCount}
+                      </span>
+                      <span className="rounded-full bg-emerald-50 px-3 py-1 text-emerald-700">
+                        Exact files linked: {product.linkedMediaCount}
+                      </span>
+                      <span className="rounded-full bg-slate-50 px-3 py-1 text-slate-600">
+                        Omitted without filename: {product.mediaRefs.filter((item) => item.omitted).length}
+                      </span>
+                    </div>
                   </div>
                 </details>
 

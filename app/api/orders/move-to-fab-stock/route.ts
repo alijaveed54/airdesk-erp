@@ -1,6 +1,5 @@
 // ================================
-// PART 1/4
-// Bulk Shift Refactor
+// Bulk Shift Refactor — With Attachment Sanitizer & Quantity Count Fix
 // ================================
 
 import { NextResponse } from "next/server";
@@ -44,9 +43,7 @@ type TransferOrderInput = {
   sourceTable?: string;
 };
 
-
 const FAB_STOCK_BASE_ID = "appEKsWCVMfGBFQ3L";
-
 
 // ================================
 // Helpers
@@ -56,14 +53,11 @@ function normalize(value: unknown) {
   return String(value ?? "").trim();
 }
 
-
 function first(value: unknown): unknown {
   return Array.isArray(value) ? value[0] : value;
 }
 
-
 function text(value: unknown) {
-
   const resolved = first(value);
 
   if (resolved === null || resolved === undefined) {
@@ -71,7 +65,6 @@ function text(value: unknown) {
   }
 
   if (typeof resolved === "object") {
-
     const objectValue = resolved as Record<string, unknown>;
 
     return normalize(
@@ -85,26 +78,17 @@ function text(value: unknown) {
   return normalize(resolved);
 }
 
-
 function numeric(value: unknown) {
-
   const parsed = Number(first(value));
-
-  return Number.isFinite(parsed)
-    ? parsed
-    : 0;
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
-
 function truthy(value: unknown) {
-
   if (value === true || value === 1) {
     return true;
   }
 
-  const normalized =
-    normalize(first(value)).toLowerCase();
-
+  const normalized = normalize(first(value)).toLowerCase();
 
   return [
     "true",
@@ -116,12 +100,10 @@ function truthy(value: unknown) {
   ].includes(normalized);
 }
 
-
 function findField(
   fields: SchemaField[],
   candidates: string[]
 ) {
-
   const lookup = new Map(
     fields.map((field) => [
       field.name.trim().toLowerCase(),
@@ -129,29 +111,20 @@ function findField(
     ])
   );
 
-
   for (const candidate of candidates) {
-
-    const found =
-      lookup.get(
-        candidate.trim().toLowerCase()
-      );
-
+    const found = lookup.get(candidate.trim().toLowerCase());
     if (found) {
       return found;
     }
   }
 
-
   return "";
 }
-
 
 function findTable(
   tables: SchemaTable[],
   candidates: string[]
 ) {
-
   const lookup = new Map(
     tables.map((table) => [
       table.name.trim().toLowerCase(),
@@ -159,42 +132,27 @@ function findTable(
     ])
   );
 
-
   for (const candidate of candidates) {
-
-    const found =
-      lookup.get(
-        candidate.trim().toLowerCase()
-      );
-
+    const found = lookup.get(candidate.trim().toLowerCase());
     if (found) {
       return found;
     }
   }
 
-
   return undefined;
 }
 
-
 function escapeFormula(value: string) {
-
   return value
     .replace(/\\/g, "\\\\")
     .replace(/'/g, "\\'");
 }
 
-
 function isoDateOnly() {
-
-  return new Date()
-    .toISOString()
-    .slice(0, 10);
+  return new Date().toISOString().slice(0, 10);
 }
 
-
 function resolveTargetToken(sourceToken: string) {
-
   return (
     process.env.FAB_STOCK_AIRTABLE_TOKEN ||
     process.env.AIRTABLE_FAB_STOCK_TOKEN ||
@@ -203,6 +161,35 @@ function resolveTargetToken(sourceToken: string) {
   ).trim();
 }
 
+/**
+ * Airtable read objects ({ id, url, thumbnails, ... }) ko clean [{ url }] format mein convert karta hai
+ */
+function sanitizeAirtableAttachments(value: unknown): Array<{ url: string }> | undefined {
+  if (!value) return undefined;
+
+  const items = Array.isArray(value) ? value : [value];
+  const cleaned: Array<{ url: string }> = [];
+
+  for (const item of items) {
+    if (!item) continue;
+
+    if (typeof item === "string" && item.startsWith("http")) {
+      cleaned.push({ url: item });
+    } else if (typeof item === "object") {
+      const obj = item as Record<string, any>;
+      const url =
+        obj.url ||
+        obj.thumbnails?.full?.url ||
+        obj.thumbnails?.large?.url;
+
+      if (url && typeof url === "string" && url.startsWith("http")) {
+        cleaned.push({ url });
+      }
+    }
+  }
+
+  return cleaned.length > 0 ? cleaned : undefined;
+}
 
 // ================================
 // Airtable Helpers
@@ -212,8 +199,6 @@ async function getSchema(
   baseId: string,
   token: string
 ): Promise<SchemaTable[]> {
-
-
   const response = await fetch(
     `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(baseId)}/tables`,
     {
@@ -224,22 +209,16 @@ async function getSchema(
     }
   );
 
-
   const data = await response.json();
 
-
   if (!response.ok) {
-
     throw new Error(
-      data?.error?.message ||
-      "Unable to load Airtable schema"
+      data?.error?.message || "Unable to load Airtable schema"
     );
   }
 
-
   return data.tables || [];
 }
-
 
 async function fetchRecord(
   baseId: string,
@@ -247,8 +226,6 @@ async function fetchRecord(
   tableName: string,
   recordId: string
 ): Promise<AirtableRecord> {
-
-
   const response = await fetch(
     `${airtableUrl(baseId, tableName)}/${encodeURIComponent(recordId)}`,
     {
@@ -257,26 +234,16 @@ async function fetchRecord(
     }
   );
 
-
   const data = await response.json();
 
-
   if (!response.ok) {
-
     throw new Error(
-      data?.error?.message ||
-      `Unable to read ${tableName} record`
+      data?.error?.message || `Unable to read ${tableName} record`
     );
   }
 
-
   return data;
 }
-// ================================
-// PART 2/4
-// Airtable CRUD + Transfer Function Start
-// ================================
-
 
 async function fetchAllRecords(
   baseId: string,
@@ -284,75 +251,44 @@ async function fetchAllRecords(
   tableName: string,
   formula = ""
 ): Promise<AirtableRecord[]> {
-
   const records: AirtableRecord[] = [];
-
   let offset = "";
 
-
   do {
-
     const params = new URLSearchParams({
       pageSize: "100",
     });
 
-
     if (formula) {
-      params.set(
-        "filterByFormula",
-        formula
-      );
+      params.set("filterByFormula", formula);
     }
-
 
     if (offset) {
-      params.set(
-        "offset",
-        offset
-      );
+      params.set("offset", offset);
     }
 
-
     const response = await fetch(
-      airtableUrl(
-        baseId,
-        tableName,
-        params
-      ),
+      airtableUrl(baseId, tableName, params),
       {
         headers: airtableHeaders(token),
         cache: "no-store",
       }
     );
 
-
     const data = await response.json();
 
-
     if (!response.ok) {
-
       throw new Error(
-        data?.error?.message ||
-        `Unable to read records from ${tableName}`
+        data?.error?.message || `Unable to read records from ${tableName}`
       );
     }
 
-
-    records.push(
-      ...(data.records || [])
-    );
-
-
+    records.push(...(data.records || []));
     offset = data.offset || "";
-
-
   } while (offset);
-
 
   return records;
 }
-
-
 
 async function createRecords(
   baseId: string,
@@ -362,27 +298,11 @@ async function createRecords(
     fields: Record<string, unknown>;
   }>
 ) {
-
-
-  for (
-    let index = 0;
-    index < records.length;
-    index += 10
-  ) {
-
-
-    const batch =
-      records.slice(
-        index,
-        index + 10
-      );
-
+  for (let index = 0; index < records.length; index += 10) {
+    const batch = records.slice(index, index + 10);
 
     const response = await fetch(
-      airtableUrl(
-        baseId,
-        tableName
-      ),
+      airtableUrl(baseId, tableName),
       {
         method: "POST",
         headers: airtableHeaders(token),
@@ -394,21 +314,15 @@ async function createRecords(
       }
     );
 
-
     const data = await response.json();
 
-
     if (!response.ok) {
-
       throw new Error(
-        data?.error?.message ||
-        `Unable to create records in ${tableName}`
+        data?.error?.message || `Unable to create records in ${tableName}`
       );
     }
   }
 }
-
-
 
 async function createSingleRecord(
   baseId: string,
@@ -416,13 +330,8 @@ async function createSingleRecord(
   tableName: string,
   fields: Record<string, unknown>
 ): Promise<AirtableRecord> {
-
-
   const response = await fetch(
-    airtableUrl(
-      baseId,
-      tableName
-    ),
+    airtableUrl(baseId, tableName),
     {
       method: "POST",
       headers: airtableHeaders(token),
@@ -434,23 +343,16 @@ async function createSingleRecord(
     }
   );
 
-
   const data = await response.json();
 
-
   if (!response.ok) {
-
     throw new Error(
-      data?.error?.message ||
-      `Unable to create record in ${tableName}`
+      data?.error?.message || `Unable to create record in ${tableName}`
     );
   }
 
-
   return data;
 }
-
-
 
 async function updateRecord(
   baseId: string,
@@ -459,8 +361,6 @@ async function updateRecord(
   recordId: string,
   fields: Record<string, unknown>
 ) {
-
-
   const response = await fetch(
     `${airtableUrl(baseId, tableName)}/${encodeURIComponent(recordId)}`,
     {
@@ -474,28 +374,20 @@ async function updateRecord(
     }
   );
 
-
   const data = await response.json();
 
-
   if (!response.ok) {
-
     throw new Error(
-      data?.error?.message ||
-      `Unable to update ${tableName}`
+      data?.error?.message || `Unable to update ${tableName}`
     );
   }
 }
+
 // ================================
-// PART 3/4
 // Transfer Order To FAB Stock
 // ================================
 
-
-async function transferOrderToFabStock(
-  input: TransferOrderInput
-) {
-
+async function transferOrderToFabStock(input: TransferOrderInput) {
   const {
     orderId,
     orderNo,
@@ -505,832 +397,402 @@ async function transferOrderToFabStock(
     source?: Awaited<ReturnType<typeof getCurrentAirtableBase>>;
   };
 
-
   if (!source) {
     throw new Error("Source base missing");
   }
 
-
   const targetBaseId = (
-    process.env.FAB_STOCK_AIRTABLE_BASE_ID ||
-    FAB_STOCK_BASE_ID
+    process.env.FAB_STOCK_AIRTABLE_BASE_ID || FAB_STOCK_BASE_ID
   ).trim();
 
+  const targetToken = resolveTargetToken(source.token);
 
-  const targetToken =
-    resolveTargetToken(source.token);
-
-
-
-  const [
-    sourceSchema,
-    targetSchema,
-  ] = await Promise.all([
-
-    getSchema(
-      source.baseId,
-      source.token
-    ),
-
-    getSchema(
-      targetBaseId,
-      targetToken
-    ),
-
+  const [sourceSchema, targetSchema] = await Promise.all([
+    getSchema(source.baseId, source.token),
+    getSchema(targetBaseId, targetToken),
   ]);
 
-
-
   const invoiceTable =
-    (
-      sourceTable
-        ? sourceSchema.find(
-            (table) =>
-              table.name
-                .trim()
-                .toLowerCase() ===
-              sourceTable
-                .trim()
-                .toLowerCase()
-          )
-        : undefined
-    )
-    ||
-    sourceSchema.find(
-      (table) =>
-        table.name === source.tables.invoice
-    )
-    ||
-    findTable(
-      sourceSchema,
-      [
-        "FAB Invoice",
-        "Invoice",
-      ]
-    );
-
-
+    (sourceTable
+      ? sourceSchema.find(
+          (table) =>
+            table.name.trim().toLowerCase() ===
+            sourceTable.trim().toLowerCase()
+        )
+      : undefined) ||
+    sourceSchema.find((table) => table.name === source.tables.invoice) ||
+    findTable(sourceSchema, ["FAB Invoice", "Invoice"]);
 
   if (!invoiceTable) {
-
-    throw new Error(
-      "FAB Invoice table not found"
-    );
+    throw new Error("FAB Invoice table not found");
   }
-
-
 
   const orderEntryTable =
-    findTable(
-      sourceSchema,
-      [
-        "FAB Order Entry",
-        "Order Entry",
-      ]
-    )
-    ||
-    sourceSchema.find(
-      (table) =>
-        table.name
-          .toLowerCase()
-          .includes(
-            "order entry"
-          )
+    findTable(sourceSchema, ["FAB Order Entry", "Order Entry"]) ||
+    sourceSchema.find((table) =>
+      table.name.toLowerCase().includes("order entry")
     );
-
-
 
   if (!orderEntryTable) {
-
-    throw new Error(
-      "FAB Order Entry table not found"
-    );
+    throw new Error("FAB Order Entry table not found");
   }
 
-
-
-  const productTable =
-    findTable(
-      targetSchema,
-      [
-        "Product",
-        "Products",
-      ]
-    );
-
-
-
-  const stockReceivedTable =
-    findTable(
-      targetSchema,
-      [
-        "Stock Received",
-      ]
-    );
-
-
+  const productTable = findTable(targetSchema, ["Product", "Products"]);
+  const stockReceivedTable = findTable(targetSchema, ["Stock Received"]);
 
   if (!productTable) {
-
-    throw new Error(
-      "FAB Stock Product table not found"
-    );
+    throw new Error("FAB Stock Product table not found");
   }
-
-
 
   if (!stockReceivedTable) {
-
-    throw new Error(
-      "Stock Received table not found"
-    );
+    throw new Error("Stock Received table not found");
   }
 
+  const invoiceRecord = await fetchRecord(
+    source.baseId,
+    source.token,
+    invoiceTable.name,
+    orderId
+  );
 
-
-  const invoiceRecord =
-    await fetchRecord(
-      source.baseId,
-      source.token,
-      invoiceTable.name,
-      orderId
-    );
-
-
-
-  const invoiceOrderNoField =
-    findField(
-      invoiceTable.fields,
-      [
-        "Order No.",
-        "Order No",
-        "Order Number",
-        "Invoice No.",
-        "Invoice No",
-      ]
-    );
-
-
+  const invoiceOrderNoField = findField(invoiceTable.fields, [
+    "Order No.",
+    "Order No",
+    "Order Number",
+    "Invoice No.",
+    "Invoice No",
+  ]);
 
   if (invoiceOrderNoField) {
-
-    const savedOrderNo =
-      text(
-        invoiceRecord.fields?.[
-          invoiceOrderNoField
-        ]
-      );
-
+    const savedOrderNo = text(invoiceRecord.fields?.[invoiceOrderNoField]);
 
     if (
       savedOrderNo &&
-      savedOrderNo.toLowerCase() !==
-      orderNo.toLowerCase()
+      savedOrderNo.toLowerCase() !== orderNo.toLowerCase()
     ) {
-
-      throw new Error(
-        "Order ID and Order No mismatch"
-      );
+      throw new Error("Order ID and Order No mismatch");
     }
   }
 
+  const movedField = findField(invoiceTable.fields, [
+    "Moved To FAB Stock",
+    "Moved to FAB Stock",
+    "Added To FAB Stock",
+    "Transferred To FAB Stock",
+  ]);
 
+  let alreadyTransferred = false;
 
-  const movedField =
-    findField(
-      invoiceTable.fields,
-      [
-        "Moved To FAB Stock",
-        "Moved to FAB Stock",
-        "Added To FAB Stock",
-        "Transferred To FAB Stock",
-      ]
-    );
+  const targetBaseIdCheck = (
+    process.env.FAB_STOCK_AIRTABLE_BASE_ID || FAB_STOCK_BASE_ID
+  ).trim();
 
+  const targetTokenCheck = resolveTargetToken(source.token);
 
-// Check actual FAB Stock transfer before blocking retry
+  const stockReceivedTableCheck = findTable(targetSchema, ["Stock Received"]);
 
-let alreadyTransferred = false;
+  if (stockReceivedTableCheck) {
+    const orderFieldCheck = findField(stockReceivedTableCheck.fields, [
+      "Order Number",
+      "Order No.",
+      "Order No",
+      "Reference",
+      "Source Order No",
+    ]);
 
-
-const targetBaseIdCheck = (
-  process.env.FAB_STOCK_AIRTABLE_BASE_ID ||
-  FAB_STOCK_BASE_ID
-).trim();
-
-
-const targetTokenCheck =
-  resolveTargetToken(
-    source.token
-  );
-
-
-
-const stockReceivedTableCheck =
-  findTable(
-    targetSchema,
-    [
-      "Stock Received"
-    ]
-  );
-
-
-
-if (
-  stockReceivedTableCheck
-) {
-
-
-  const orderFieldCheck =
-    findField(
-      stockReceivedTableCheck.fields,
-      [
-        "Order Number",
-        "Order No.",
-        "Order No",
-        "Reference",
-        "Source Order No"
-      ]
-    );
-
-
-
-  if (
-    orderFieldCheck
-  ) {
-
-
-    const previousTransfers =
-      await fetchAllRecords(
+    if (orderFieldCheck) {
+      const previousTransfers = await fetchAllRecords(
         targetBaseIdCheck,
         targetTokenCheck,
         stockReceivedTableCheck.name,
         `LOWER({${orderFieldCheck}}&'')=LOWER('${escapeFormula(orderNo)}')`
       );
 
-
-
-    if (
-      previousTransfers.length > 0
-    ) {
-
-      alreadyTransferred = true;
-
+      if (previousTransfers.length > 0) {
+        alreadyTransferred = true;
+      }
     }
-
   }
 
-}
-
-
-
-if (
-  alreadyTransferred
-) {
-
-  throw new Error(
-    `${orderNo} already transferred to FAB Stock`
-  );
-
-}
-  if (
-    movedField &&
-    truthy(
-      invoiceRecord.fields?.[
-        movedField
-      ]
-    )
-  ) {
-
-    throw new Error(
-      `${orderNo} already moved to FAB Stock`
-    );
+  if (alreadyTransferred) {
+    throw new Error(`${orderNo} already transferred to FAB Stock`);
   }
 
-
+  if (movedField && truthy(invoiceRecord.fields?.[movedField])) {
+    throw new Error(`${orderNo} already moved to FAB Stock`);
+  }
 
   const orderLinkField =
     orderEntryTable.fields.find(
       (field) =>
-        field.type ===
-        "multipleRecordLinks" &&
-        field.options
-          ?.linkedTableId ===
-        invoiceTable.id
-    )?.name
-    ||
-    findField(
-      orderEntryTable.fields,
-      [
-        "Order No.",
-        "Order No",
-        "Invoice",
-        "Order",
-      ]
-    );
+        field.type === "multipleRecordLinks" &&
+        field.options?.linkedTableId === invoiceTable.id
+    )?.name ||
+    findField(orderEntryTable.fields, [
+      "Order No.",
+      "Order No",
+      "Invoice",
+      "Order",
+    ]);
 
+  const sourceSkuField = findField(orderEntryTable.fields, [
+    "SKU",
+    "Item Code",
+    "Product SKU",
+    "Supplier SKU",
+  ]);
 
+  const sourceQtyField = findField(orderEntryTable.fields, [
+    "quantity",
+    "Quantity",
+    "Qty",
+    "Qt",
+  ]);
 
-  const sourceSkuField =
-    findField(
-      orderEntryTable.fields,
-      [
-        "SKU",
-        "Item Code",
-        "Product SKU",
-        "Supplier SKU",
-      ]
-    );
-
-
-
-  const sourceQtyField =
-    findField(
-      orderEntryTable.fields,
-      [
-        "quantity",
-        "Quantity",
-        "Qty",
-        "Qt",
-      ]
-    );
-
-
-
-  if (
-    !orderLinkField ||
-    !sourceSkuField ||
-    !sourceQtyField
-  ) {
-
-    throw new Error(
-      "FAB Order Entry fields missing"
-    );
+  if (!orderLinkField || !sourceSkuField || !sourceQtyField) {
+    throw new Error("FAB Order Entry fields missing");
   }
 
+  const escapedOrderNo = escapeFormula(orderNo);
 
-
-  const escapedOrderNo =
-    escapeFormula(
-      orderNo
-    );
-
-
-
-  let itemRecords =
-    await fetchAllRecords(
-      source.baseId,
-      source.token,
-      orderEntryTable.name,
-      `FIND(LOWER('${escapedOrderNo}'),LOWER(ARRAYJOIN({${orderLinkField}}&'')))>0`
-    );
-
-
-
-  if (
-    itemRecords.length === 0
-  ) {
-
-    throw new Error(
-      `No items found for ${orderNo}`
-    );
-  }
-
-
-
-  const groupedItems =
-    new Map<string, TransferItem>();
-
-
-
-  for (
-    const record of itemRecords
-  ) {
-
-
-    const quantity =
-  numeric(
-    record.fields?.[
-      sourceQtyField
-    ]
+  const itemRecords = await fetchAllRecords(
+    source.baseId,
+    source.token,
+    orderEntryTable.name,
+    `FIND(LOWER('${escapedOrderNo}'),LOWER(ARRAYJOIN({${orderLinkField}}&'')))>0`
   );
 
-
-let sku = "";
-
-let sourceProductRecordId = "";
-
-
-const linkedSkuValue =
-  record.fields?.[
-    sourceSkuField
-  ];
-
-
-
-if (
-  Array.isArray(linkedSkuValue) &&
-  linkedSkuValue.length > 0
-) {
-
-  sourceProductRecordId =
-    String(
-      linkedSkuValue[0]
-    );
-
-
-  const skuFieldSchema =
-    orderEntryTable.fields.find(
-      (field) =>
-        field.name === sourceSkuField
-    );
-
-
-  const linkedProductTable =
-    sourceSchema.find(
-      (table) =>
-        table.id ===
-        skuFieldSchema?.options
-          ?.linkedTableId
-    );
-
-
-  if (linkedProductTable) {
-
-    const sourceProduct =
-      await fetchRecord(
-        source.baseId,
-        source.token,
-        linkedProductTable.name,
-        sourceProductRecordId
-      );
-
-
-    sku =
-      text(
-        sourceProduct.fields?.SKU ||
-        sourceProduct.fields?.Sku ||
-        sourceProduct.fields?.["Item Code"]
-      );
-
+  if (itemRecords.length === 0) {
+    throw new Error(`No items found for ${orderNo}`);
   }
 
-} else {
+  const groupedItems = new Map<string, TransferItem>();
 
-  sku =
-    text(linkedSkuValue);
+  for (const record of itemRecords) {
+    const quantity = numeric(record.fields?.[sourceQtyField]);
 
-}
+    let sku = "";
+    let sourceProductRecordId = "";
 
+    const linkedSkuValue = record.fields?.[sourceSkuField];
 
+    if (Array.isArray(linkedSkuValue) && linkedSkuValue.length > 0) {
+      sourceProductRecordId = String(linkedSkuValue[0]);
 
-    if (
-      !sku ||
-      quantity <= 0
-    ) {
+      const skuFieldSchema = orderEntryTable.fields.find(
+        (field) => field.name === sourceSkuField
+      );
+
+      const linkedProductTable = sourceSchema.find(
+        (table) => table.id === skuFieldSchema?.options?.linkedTableId
+      );
+
+      if (linkedProductTable) {
+        const sourceProduct = await fetchRecord(
+          source.baseId,
+          source.token,
+          linkedProductTable.name,
+          sourceProductRecordId
+        );
+
+        sku = text(
+          sourceProduct.fields?.SKU ||
+          sourceProduct.fields?.Sku ||
+          sourceProduct.fields?.["Item Code"]
+        );
+      }
+    } else {
+      sku = text(linkedSkuValue);
+    }
+
+    if (!sku || quantity <= 0) {
       continue;
     }
 
+    const key = sku.toLowerCase();
+    const existing = groupedItems.get(key);
 
-
-    const key =
-      sku.toLowerCase();
-
-
-
-    const existing =
-      groupedItems.get(key);
-
-
-
-    groupedItems.set(
-  key,
-  {
-    sku,
-    quantity:
-      (existing?.quantity || 0)
-      + quantity,
-
-    sourceProductRecordId:
-      sourceProductRecordId ||
-      existing?.sourceProductRecordId,
-  }
-);
+    groupedItems.set(key, {
+      sku,
+      quantity: (existing?.quantity || 0) + quantity,
+      sourceProductRecordId:
+        sourceProductRecordId || existing?.sourceProductRecordId,
+    });
   }
 
-
-
-  if (
-    groupedItems.size === 0
-  ) {
-
-    throw new Error(
-      "No valid SKU found"
-    );
+  if (groupedItems.size === 0) {
+    throw new Error("No valid SKU found");
   }
-  
-// ================================
-// PART 4-A
-// Product + Stock Transfer
-// ================================
 
+  // ================================
+  // Product + Stock Transfer
+  // ================================
 
-  const productSkuField =
-    findField(
-      productTable.fields,
-      [
-        "SKU",
-        "Sku",
-        "Product SKU",
-        "Item Code",
-      ]
-    );
-
+  const productSkuField = findField(productTable.fields, [
+    "SKU",
+    "Sku",
+    "Product SKU",
+    "Item Code",
+  ]);
 
   const stockProductLinkField =
     stockReceivedTable.fields.find(
       (field) =>
-        field.type ===
-        "multipleRecordLinks" &&
-        field.options?.linkedTableId ===
-        productTable.id
-    )?.name
-    ||
-    findField(
-      stockReceivedTable.fields,
-      [
-        "SKU-",
-        "Product",
-        "Products",
-        "SKU",
-        "Item",
-      ]
-    );
+        field.type === "multipleRecordLinks" &&
+        field.options?.linkedTableId === productTable.id
+    )?.name ||
+    findField(stockReceivedTable.fields, [
+      "SKU-",
+      "Product",
+      "Products",
+      "SKU",
+      "Item",
+    ]);
 
+  const stockQuantityField = findField(stockReceivedTable.fields, [
+    "Stock +",
+    "Quantity",
+    "Qty",
+    "Stock Received",
+    "Received Quantity",
+  ]);
 
-  const stockQuantityField =
-    findField(
-      stockReceivedTable.fields,
-      [
-        "Stock +",
-        "Quantity",
-        "Qty",
-        "Stock Received",
-        "Received Quantity",
-      ]
-    );
+  const stockOrderNoField = findField(stockReceivedTable.fields, [
+    "Order Number",
+    "Order No.",
+    "Order No",
+    "Reference",
+  ]);
 
+  const stockDateField = findField(stockReceivedTable.fields, [
+    "Date",
+    "Received Date",
+    "Entry Date",
+  ]);
 
-  const stockOrderNoField =
-    findField(
-      stockReceivedTable.fields,
-      [
-        "Order Number",
-        "Order No.",
-        "Order No",
-        "Reference",
-      ]
-    );
-
-
-  const stockDateField =
-    findField(
-      stockReceivedTable.fields,
-      [
-        "Date",
-        "Received Date",
-        "Entry Date",
-      ]
-    );
-
-
-  if (
-    !productSkuField ||
-    !stockProductLinkField ||
-    !stockQuantityField
-  ) {
-
-    throw new Error(
-      "FAB Stock fields missing"
-    );
+  if (!productSkuField || !stockProductLinkField || !stockQuantityField) {
+    throw new Error("FAB Stock fields missing");
   }
 
-
-
-  const productRecords =
-    new Map<string, AirtableRecord>();
-
-
+  const productRecords = new Map<string, AirtableRecord>();
   const createdProducts: string[] = [];
 
-
-
-  for (
-  const item of groupedItems.values()
-) {
-
-
-  const matches =
-    await fetchAllRecords(
+  for (const item of groupedItems.values()) {
+    const matches = await fetchAllRecords(
       targetBaseId,
       targetToken,
       productTable.name,
       `LOWER({${productSkuField}}&'')=LOWER('${escapeFormula(item.sku)}')`
     );
 
+    if (matches.length > 0) {
+      productRecords.set(item.sku.toLowerCase(), matches[0]);
+      continue;
+    }
 
-  if (
-    matches.length > 0
-  ) {
+    const productFields: Record<string, unknown> = {
+      [productSkuField]: item.sku,
+    };
 
-    productRecords.set(
-      item.sku.toLowerCase(),
-      matches[0]
-    );
-
-    continue;
-  }
-
-
-
-  let productFields: Record<string, unknown> = {
-    [productSkuField]:
-      item.sku,
-  };
-
-
-
-  // Copy source product data from linked record
-
-  if (
-    item.sourceProductRecordId
-  ) {
-
-
-    const skuFieldSchema =
-      orderEntryTable.fields.find(
-        (field) =>
-          field.name === sourceSkuField
+    // Copy source product data from linked record
+    if (item.sourceProductRecordId) {
+      const skuFieldSchema = orderEntryTable.fields.find(
+        (field) => field.name === sourceSkuField
       );
 
-
-    const sourceProductTable =
-      sourceSchema.find(
-        (table) =>
-          table.id ===
-          skuFieldSchema?.options
-            ?.linkedTableId
+      const sourceProductTable = sourceSchema.find(
+        (table) => table.id === skuFieldSchema?.options?.linkedTableId
       );
 
-
-
-    if (
-      sourceProductTable
-    ) {
-
-
-      const sourceProduct =
-        await fetchRecord(
+      if (sourceProductTable) {
+        const sourceProduct = await fetchRecord(
           source.baseId,
           source.token,
           sourceProductTable.name,
           item.sourceProductRecordId
         );
 
+        const imageFieldNames = new Set([
+          "image",
+          "images",
+          "product image",
+          "photo",
+          "photos",
+          "attachment",
+          "attachments",
+        ]);
 
+        const copyFields = [
+          "SKU",
+          "Sku",
+          "Item Code",
+          "Name",
+          "Product Name",
+          "Item Name",
+          "Image",
+          "Images",
+          "Product Image",
+          "Photo",
+          "Color",
+          "Colour",
+          "Size",
+          "Price",
+          "Doha Price",
+        ];
 
-      const copyFields = [
-        "SKU",
-        "Sku",
-        "Item Code",
-        "Name",
-        "Product Name",
-        "Item Name",
-        "Image",
-        "Images",
-        "Product Image",
-        "Photo",
-        "Color",
-        "Colour",
-        "Size",
-        "Price",
-        "Doha Price",
-      ];
+        for (const field of copyFields) {
+          const rawValue = sourceProduct.fields[field];
+          if (rawValue !== undefined && rawValue !== null) {
+            const isImageField = imageFieldNames.has(field.toLowerCase());
 
-
-
-      for (
-        const field of copyFields
-      ) {
-
-
-        if (
-          sourceProduct.fields[field] !== undefined
-        ) {
-
-          productFields[field] =
-            sourceProduct.fields[field];
-
+            if (isImageField) {
+              const sanitized = sanitizeAirtableAttachments(rawValue);
+              if (sanitized) {
+                productFields[field] = sanitized;
+              }
+            } else {
+              productFields[field] = rawValue;
+            }
+          }
         }
-
       }
-
     }
 
-  }
-
-
-
-  const created =
-    await createSingleRecord(
+    const created = await createSingleRecord(
       targetBaseId,
       targetToken,
       productTable.name,
       productFields
     );
 
+    productRecords.set(item.sku.toLowerCase(), created);
+    createdProducts.push(item.sku);
+  }
 
+  const transferDate = isoDateOnly();
 
-  productRecords.set(
-    item.sku.toLowerCase(),
-    created
-  );
+  const stockReceivedRecords = Array.from(groupedItems.values()).map((item) => {
+    const product = productRecords.get(item.sku.toLowerCase());
 
+    if (!product) {
+      throw new Error(`Product missing ${item.sku}`);
+    }
 
-  createdProducts.push(
-    item.sku
-  );
+    const fields: Record<string, unknown> = {
+      [stockProductLinkField]: [product.id],
+      [stockQuantityField]: item.quantity,
+    };
 
-}
+    if (stockOrderNoField) {
+      fields[stockOrderNoField] = orderNo;
+    }
 
+    if (stockDateField) {
+      fields[stockDateField] = transferDate;
+    }
 
-
-  const transferDate =
-    isoDateOnly();
-
-
-
-  const stockReceivedRecords =
-    Array.from(
-      groupedItems.values()
-    ).map(
-      (item) => {
-
-
-        const product =
-          productRecords.get(
-            item.sku.toLowerCase()
-          );
-
-
-
-        if (!product) {
-
-          throw new Error(
-            `Product missing ${item.sku}`
-          );
-        }
-
-
-
-        const fields: Record<string, unknown> = {
-          [stockProductLinkField]:
-            [
-              product.id
-            ],
-
-          [stockQuantityField]:
-            item.quantity,
-        };
-
-
-
-        if (
-          stockOrderNoField
-        ) {
-
-          fields[stockOrderNoField] =
-            orderNo;
-        }
-
-
-        if (
-          stockDateField
-        ) {
-
-          fields[stockDateField] =
-            transferDate;
-        }
-
-
-
-        return {
-          fields,
-        };
-      }
-    );
-
-
+    return { fields };
+  });
 
   await createRecords(
     targetBaseId,
@@ -1339,278 +801,141 @@ if (
     stockReceivedRecords
   );
 
+  // Update source invoice record flag so it is marked as moved
+  if (movedField) {
+    try {
+      await updateRecord(
+        source.baseId,
+        source.token,
+        invoiceTable.name,
+        orderId,
+        {
+          [movedField]: true,
+        }
+      );
+    } catch {
+      // Flag update failure should not break completed transfer
+    }
+  }
 
+  const totalQty = Array.from(groupedItems.values()).reduce(
+    (sum, item) => sum + item.quantity,
+    0
+  );
 
   return {
     success: true,
     orderNo,
-    totalQuantity:
-      Array.from(
-        groupedItems.values()
-      ).reduce(
-        (sum,item)=>
-          sum + item.quantity,
-        0
-      ),
+    quantity: totalQty,
+    totalQuantity: totalQty,
+    totalQty: totalQty,
+    addedCount: totalQty,
+    count: totalQty,
+    pcs: totalQty,
     createdProducts,
   };
-
 }
 
 // ================================
-// PART 4-B
 // Final POST Handler
-// Single + Bulk Shift
 // ================================
 
-
-export async function POST(
-  request: Request
-) {
-
+export async function POST(request: Request) {
   try {
+    const session = await getSession();
 
-
-    const session =
-      await getSession();
-
-
-
-    if (
-      !session ||
-      (
-        session.role !== "Admin" &&
-        !session.superAdmin
-      )
-    ) {
-
+    if (!session || (session.role !== "Admin" && !session.superAdmin)) {
       return NextResponse.json(
         {
           success: false,
-          message:
-            "Only Admin can move orders to FAB Stock",
+          message: "Only Admin can move orders to FAB Stock",
         },
-        {
-          status: 403,
-        }
+        { status: 403 }
       );
     }
 
+    const source = await getCurrentAirtableBase();
 
-
-    const source =
-      await getCurrentAirtableBase();
-
-
-
-    const sourceBaseName =
-      normalize(
-        source.baseName
-      ).toLowerCase();
-
-
+    const sourceBaseName = normalize(source.baseName).toLowerCase();
 
     const isFabNonStock =
-      (
-        sourceBaseName.includes("fab") ||
-        sourceBaseName.includes("doha")
-      )
-      &&
-      (
-        sourceBaseName.includes("non stock") ||
+      (sourceBaseName.includes("fab") || sourceBaseName.includes("doha")) &&
+      (sourceBaseName.includes("non stock") ||
         sourceBaseName.includes("non-stock") ||
-        sourceBaseName.includes("without stock")
-      );
-
-
+        sourceBaseName.includes("without stock"));
 
     if (!isFabNonStock) {
-
       return NextResponse.json(
         {
-          success:false,
-          message:
-            "This action is only available in FAB Doha Non Stock base",
+          success: false,
+          message: "This action is only available in FAB Doha Non Stock base",
         },
-        {
-          status:400,
-        }
+        { status: 400 }
       );
     }
 
+    const body = await request.json();
 
-
-    const body =
-      await request.json();
-
-
-
-    /*
-      SINGLE ORDER
-
-      {
-        orderId,
-        orderNo,
-        sourceTable
-      }
-
-
-      BULK
-
-      {
-        orders:[
+    const orders = Array.isArray(body.orders)
+      ? body.orders
+      : [
           {
-            orderId,
-            orderNo,
-            sourceTable
-          }
-        ]
-      }
+            orderId: body.orderId,
+            orderNo: body.orderNo,
+            sourceTable: body.sourceTable,
+          },
+        ];
 
-    */
-
-
-
-    const orders =
-      Array.isArray(body.orders)
-        ? body.orders
-        : [
-            {
-              orderId:
-                body.orderId,
-
-              orderNo:
-                body.orderNo,
-
-              sourceTable:
-                body.sourceTable,
-            },
-          ];
-
-
-
-    if (
-      orders.length === 0
-    ) {
-
+    if (orders.length === 0) {
       return NextResponse.json(
         {
-          success:false,
-          message:
-            "No orders selected",
+          success: false,
+          message: "No orders selected",
         },
-        {
-          status:400,
-        }
+        { status: 400 }
       );
     }
 
+    const results: any[] = [];
 
-
-    const results:any[] = [];
-
-
-
-    for (
-      const order of orders
-    ) {
-
-
+    for (const order of orders) {
       try {
-
-
-        const result =
-          await transferOrderToFabStock(
-            {
-              orderId:
-                normalize(
-                  order.orderId
-                ),
-
-              orderNo:
-                normalize(
-                  order.orderNo
-                ),
-
-              sourceTable:
-                normalize(
-                  order.sourceTable
-                ),
-
-              source,
-            } as any
-          );
-
-
+        const result = await transferOrderToFabStock({
+          orderId: normalize(order.orderId),
+          orderNo: normalize(order.orderNo),
+          sourceTable: normalize(order.sourceTable),
+          source,
+        } as any);
 
         results.push(result);
-
-
-      } catch(error) {
-
-
-        results.push(
-          {
-            success:false,
-            orderNo:
-              order.orderNo,
-
-            message:
-              error instanceof Error
-                ? error.message
-                : "Transfer failed",
-          }
-        );
+      } catch (error) {
+        results.push({
+          success: false,
+          orderNo: order.orderNo,
+          message: error instanceof Error ? error.message : "Transfer failed",
+        });
       }
     }
 
+    const failed = results.filter((item) => !item.success);
 
-
-    const failed =
-      results.filter(
-        item =>
-          !item.success
-      );
-
-
-
-    return NextResponse.json(
-      {
-        success:
-          failed.length === 0,
-
-        message:
-          failed.length === 0
-            ? `${results.length} order(s) moved to FAB Stock successfully`
-            : "Some orders failed during transfer",
-
-        results,
-      }
-    );
-
-
-
-  } catch(error) {
-
-
-    console.error(
-      "MOVE TO FAB STOCK ERROR:",
-      error
-    );
-
+    return NextResponse.json({
+      success: failed.length === 0,
+      message:
+        failed.length === 0
+          ? `${results.length} order(s) moved to FAB Stock successfully`
+          : "Some orders failed during transfer",
+      results,
+    });
+  } catch (error) {
+    console.error("MOVE TO FAB STOCK ERROR:", error);
 
     return NextResponse.json(
       {
-        success:false,
-        message:
-          error instanceof Error
-            ? error.message
-            : "Unknown error",
+        success: false,
+        message: error instanceof Error ? error.message : "Unknown error",
       },
-      {
-        status:500,
-      }
+      { status: 500 }
     );
-
   }
 }
