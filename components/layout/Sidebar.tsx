@@ -28,6 +28,7 @@ import {
   Clock,
   Pin,
   PinOff,
+  FileSpreadsheet,
 } from "lucide-react";
 
 type Session = {
@@ -178,6 +179,7 @@ export default function Sidebar() {
 
   const canR2Upload = Boolean(session) && !isSupplier && !isEmployeeRole;
   const canImages = isAdmin || isManager || isEmployee;
+  const canSkuParser = (isAdmin || isManager || isEmployee) && !isSupplier;
   const canWhatsAppImport =
     (isAdmin || isManager || isEmployee) && !isEmployeeRole;
   const canFacebookPages = isAdmin;
@@ -646,7 +648,7 @@ export default function Sidebar() {
           </div>
         </div>
 
-        {/* Pin / Unpin Button (Optional Desktop Convenience) */}
+        {/* Pin / Unpin Button */}
         <div className="mb-3 hidden px-1 lg:block">
           <button
             type="button"
@@ -679,7 +681,7 @@ export default function Sidebar() {
             </>
           )}
 
-          {(canInventory || canR2Upload || canImages || isAdmin) && (
+          {(canInventory || canR2Upload || canImages || canSkuParser || isAdmin) && (
             <>
               {renderSectionLabel("Inventory & Images")}
 
@@ -850,6 +852,17 @@ export default function Sidebar() {
                 >
                   <Sparkles size={18} className="shrink-0" />
                   {!isCollapsed && <span>Product Image Generator</span>}
+                </Link>
+              )}
+
+              {canSkuParser && (
+                <Link
+                  href="/tools/whatsapp-sku-parser"
+                  title={isCollapsed ? "WhatsApp SKU Parser" : undefined}
+                  className={navLinkClass("/tools/whatsapp-sku-parser")}
+                >
+                  <FileSpreadsheet size={18} className="shrink-0 text-emerald-600" />
+                  {!isCollapsed && <span>WhatsApp SKU Parser</span>}
                 </Link>
               )}
 
