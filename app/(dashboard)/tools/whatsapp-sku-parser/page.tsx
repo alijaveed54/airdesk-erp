@@ -88,7 +88,7 @@ function parseSizeString(text: string): string {
     return `${val}`;
   }
 
-  return 'Free Size';
+  return '';
 }
 
 function parseFabricMaterial(text: string): string {
@@ -155,6 +155,113 @@ function extractDateFromLine(line: string): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
+function extractSkuFromLine(line: string): string | null {
+  const cleanLine = line.trim();
+  if (!cleanLine) return null;
+
+  const directMatch = cleanLine.match(/^([A-Z]{3,4})\s*[-_]?\s*(\d{4,8})$/i);
+  if (directMatch) {
+    return `${directMatch[1].toUpperCase()}${directMatch[2]}`;
+  }
+
+  const chatMatch = cleanLine.match(/:\s*([A-Z]{3,4})\s*[-_]?\s*(\d{4,8})\s*$/i);
+  if (chatMatch) {
+    return `${chatMatch[1].toUpperCase()}${chatMatch[2]}`;
+  }
+
+  return null;
+}
+
+function parseSkuParts(skuStr: string): { prefix: string; num: number; padLen: number } | null {
+  const m = skuStr.trim().match(/^([A-Z]{2,5})\s*[-_]?\s*(\d+)$/i);
+  if (!m) return null;
+  return {
+    prefix: m[1].toUpperCase(),
+    num: parseInt(m[2], 10),
+    padLen: m[2].length,
+  };
+}
+
+function parseSalePriceAndSupplier(blockText: string): { salePrice: string; supplierCode: string } {
+  const aedMatches = [
+    /(?:^|[^\w])AED\s*(\d{2,4})\s*([a-z]{2,5})(?:[^\w]|$)/i,
+    /(?:^|[^\w])([a-z]{2,5})\s*AED\s*(\d{2,4})(?:[^\w]|$)/i,
+    /(?:^|[^\w])AED\s*(\d{2,4})(?:[^\w]|$)/i,
+  ];
+
+  for (const pat of aedMatches) {
+    const match = blockText.match(pat);
+    if (match) {
+      if (match.length >= 3 && match[1] && match[2]) {
+        const isFirstDigits = /^\d+$/.test(match[1]);
+        const price = isFirstDigits ? match[1] : match[2];
+        const code = (isFirstDigits ? match[2] : match[1]).toUpperCase();
+        return { salePrice: price, supplierCode: code };
+      } else if (match[1]) {
+        return { salePrice: match[1], supplierCode: '' };
+      }
+    }
+  }
+
+  const lines = blockText
+    .split(/\r?\n/)
+    .map(l => l.trim().replace(/^[*_~]+|[*_~]+$/g, ''))
+    .filter(Boolean);
+
+  let candidatePrice = '';
+  let candidateCode = '';
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    const numFirst = line.match(/^(\d{2,4})\s+([a-zA-Z]{2,5})$/);
+    const codeFirst = line.match(/^([a-zA-Z]{2,5})\s+(\d{2,4})$/);
+
+    if (numFirst) {
+      const priceVal = numFirst[1];
+      const codeVal = numFirst[2];
+      if (!/^(size|pure|soft|full|with|rate|cost|silk)$/i.test(codeVal)) {
+        return { salePrice: priceVal, supplierCode: codeVal.toUpperCase() };
+      }
+    } else if (codeFirst) {
+      const codeVal = codeFirst[1];
+      const priceVal = codeFirst[2];
+      if (!/^(size|pure|soft|full|with|rate|cost|silk)$/i.test(codeVal)) {
+        return { salePrice: priceVal, supplierCode: codeVal.toUpperCase() };
+      }
+    }
+
+    if (/^\d{2,4}$/.test(line)) {
+      const numVal = parseInt(line, 10);
+      if (numVal >= 30 && numVal <= 999) {
+        candidatePrice = line;
+
+        if (i + 1 < lines.length) {
+          const nextLine = lines[i + 1];
+          if (/^[a-zA-Z]{2,5}$/.test(nextLine) && !/^(size\vert{}pure\vert{}soft\vert{}full\vert{}with\vert{}rate\vert{}cost\vert{}silk)$/i.test(nextLine)) {
+            candidateCode = nextLine.toUpperCase();
+            return { salePrice: candidatePrice, supplierCode: candidateCode };
+          }
+        }
+
+        if (i - 1 >= 0) {
+          const prevLine = lines[i - 1];
+          if (/^[a-zA-Z]{2,5}$/.test(prevLine) && !/^(size\vert{}pure\vert{}soft\vert{}full\vert{}with\vert{}rate\vert{}cost\vert{}silk)$/i.test(prevLine)) {
+            candidateCode = prevLine.toUpperCase();
+            return { salePrice: candidatePrice, supplierCode: candidateCode };
+          }
+        }
+      }
+    }
+  }
+
+  if (candidatePrice) {
+    return { salePrice: candidatePrice, supplierCode: candidateCode };
+  }
+
+  return { salePrice: '', supplierCode: '' };
+}
+
 async function createWatermarkedImageBlob(
   fileBlob: Blob,
   currency: 'AED' | 'QAR',
@@ -200,17 +307,25 @@ async function createWatermarkedImageBlob(
   const badgePadX = Math.round(width * 0.025);
   const badgePadY = Math.round(height * 0.012);
 
-  // Top-Left Pink Badge
+  const cleanSize = (product.size || '').trim();
+  const hasSize = Boolean(cleanSize);
+
   const line1 = `${product.sku} - ${currency} ${product.salePrice}`.trim();
-  const line2 = `Size - ${product.size}`.trim();
+  const line2 = hasSize ? `Size - ${cleanSize}` : '';
 
   ctx.font = `bold ${baseFontSize}px Arial, sans-serif`;
   const wLine1 = ctx.measureText(line1).width;
-  ctx.font = `bold ${Math.round(baseFontSize * 0.9)}px Arial, sans-serif`;
-  const wLine2 = ctx.measureText(line2).width;
+
+  let wLine2 = 0;
+  if (hasSize) {
+    ctx.font = `bold ${Math.round(baseFontSize * 0.9)}px Arial, sans-serif`;
+    wLine2 = ctx.measureText(line2).width;
+  }
 
   const badgeWidth = Math.max(wLine1, wLine2) + badgePadX * 2;
-  const badgeHeight = baseFontSize * 2.5 + badgePadY * 2;
+  const badgeHeight = hasSize
+    ? baseFontSize * 2.5 + badgePadY * 2
+    : baseFontSize * 1.35 + badgePadY * 2;
 
   ctx.fillStyle = '#f69cb2';
   ctx.fillRect(0, 0, badgeWidth, badgeHeight);
@@ -220,10 +335,11 @@ async function createWatermarkedImageBlob(
   ctx.font = `bold ${baseFontSize}px Arial, sans-serif`;
   ctx.fillText(line1, badgePadX, badgePadY);
 
-  ctx.font = `bold ${Math.round(baseFontSize * 0.9)}px Arial, sans-serif`;
-  ctx.fillText(line2, badgePadX, badgePadY + baseFontSize * 1.3);
+  if (hasSize) {
+    ctx.font = `bold ${Math.round(baseFontSize * 0.9)}px Arial, sans-serif`;
+    ctx.fillText(line2, badgePadX, badgePadY + baseFontSize * 1.3);
+  }
 
-  // Top-Right Fabric text
   if (product.material) {
     const matText = `Fabric - ${product.material}`;
     ctx.font = `bold ${Math.round(baseFontSize * 0.85)}px Arial, sans-serif`;
@@ -236,7 +352,6 @@ async function createWatermarkedImageBlob(
     ctx.fillText(matText, width - matWidth - badgePadX, badgePadY);
   }
 
-  // Bottom full-width white bar
   if (product.workType) {
     const bottomBarHeight = Math.round(baseFontSize * 2.2);
     ctx.fillStyle = '#ffffff';
@@ -277,10 +392,11 @@ export default function WhatsAppSkuParserPage() {
   const [products, setProducts] = useState<ParsedProduct[]>([]);
   const [statusMsg, setStatusMsg] = useState<string>('');
   const [isProcessingFiles, setIsProcessingFiles] = useState<boolean>(false);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [expandedIds, setExpandedIds] = useState<string[]>([]);
 
   const [filterStartDate, setFilterStartDate] = useState<string>('');
   const [filterStartSku, setFilterStartSku] = useState<string>('');
+  const [assignStartSku, setAssignStartSku] = useState<string>('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
   const [dirHandle, setDirHandle] = useState<any>(null);
@@ -329,12 +445,9 @@ export default function WhatsAppSkuParserPage() {
         continue;
       }
 
-      const userSkuMatch = line.match(/(?:Ali Jazz|Dua Ali|You|Me|Ali javeed).*?:\s*([A-Z]{3,4}\d{5,8})/i) ||
-                           line.match(/^([A-Z]{3,4}\d{5,8})$/i);
-
-      if (userSkuMatch) {
-        const foundSku = userSkuMatch[1].toUpperCase();
-        if (filterStartSku.trim() && foundSku === filterStartSku.trim().toUpperCase()) {
+      const foundSku = extractSkuFromLine(line);
+      if (foundSku) {
+        if (filterStartSku.trim() && foundSku.toUpperCase() === filterStartSku.trim().toUpperCase()) {
           continue;
         }
         skuList.push(foundSku);
@@ -358,6 +471,10 @@ export default function WhatsAppSkuParserPage() {
     const parsed: ParsedProduct[] = [];
     let skuIndex = 0;
 
+    const baseSkuConfig =
+      parseSkuParts(assignStartSku.trim()) ||
+      (filterStartSku.trim() ? parseSkuParts(filterStartSku.trim()) : null);
+
     for (const block of rawBlocks) {
       const blockText = block.text;
 
@@ -377,19 +494,23 @@ export default function WhatsAppSkuParserPage() {
         costPrice = costMatch[1];
       }
 
-      let salePrice = '';
-      let supplierCode = '';
-      const saleMatch = blockText.match(/(?:aed\s*(\d{2,4})\s*([a-z]{3,4})|([a-z]{3,4})\s*aed\s*(\d{2,4}))/i);
-      if (saleMatch) {
-        salePrice = saleMatch[1] || saleMatch[4] || '';
-        supplierCode = (saleMatch[2] || saleMatch[3] || '').toUpperCase();
-      }
+      const { salePrice, supplierCode } = parseSalePriceAndSupplier(blockText);
 
       if (!costPrice && !salePrice && mediaFiles.length === 0) {
         continue;
       }
 
-      const assignedSku = skuList[skuIndex] || `${supplierCode || 'SKU'}${100000 + skuIndex}`;
+      let assignedSku = skuList[skuIndex] || '';
+
+      if (!assignedSku) {
+        if (baseSkuConfig) {
+          const nextNum = baseSkuConfig.num + skuIndex;
+          assignedSku = `${baseSkuConfig.prefix}${String(nextNum).padStart(baseSkuConfig.padLen, '0')}`;
+        } else {
+          assignedSku = `${supplierCode || 'SKU'}${100000 + skuIndex}`;
+        }
+      }
+
       skuIndex++;
 
       const isKts = supplierCode.includes('KTS') || assignedSku.startsWith('KTS');
@@ -414,7 +535,8 @@ export default function WhatsAppSkuParserPage() {
     }
 
     setProducts(parsed);
-    setStatusMsg(`Loaded ${parsed.length} products! Connect Media Folder to preview image thumbnails.`);
+    setExpandedIds([]);
+    setStatusMsg(`Loaded ${parsed.length} products! (Chat SKUs detected: ${skuList.length}).`);
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -431,6 +553,61 @@ export default function WhatsAppSkuParserPage() {
       copy[index] = { ...copy[index], [field]: value };
       return copy;
     });
+  };
+
+  const applySequentialSkuReorder = () => {
+    const config = parseSkuParts(assignStartSku.trim());
+    if (!config) {
+      alert('Valid starting SKU likhein (maslan: KTS101105).');
+      return;
+    }
+
+    setProducts(prev =>
+      prev.map((p, idx) => ({
+        ...p,
+        sku: `${config.prefix}${String(config.num + idx).padStart(config.padLen, '0')}`,
+      }))
+    );
+
+    setStatusMsg(`All ${products.length} products renumbered sequentially starting from "${assignStartSku.trim().toUpperCase()}".`);
+  };
+
+  const moveMediaToSku = (fromProductIdx: number, fileName: string, targetSku: string) => {
+    if (!targetSku || targetSku === products[fromProductIdx].sku) return;
+
+    setProducts(prev => {
+      const targetIdx = prev.findIndex(p => p.sku === targetSku);
+      if (targetIdx === -1) {
+        alert(`Target SKU ${targetSku} nahi mila.`);
+        return prev;
+      }
+
+      const copy = [...prev];
+      const sourceProd = copy[fromProductIdx];
+      const targetProd = copy[targetIdx];
+
+      const updatedSourceMedia = (sourceProd.mediaFiles || []).filter(f => f !== fileName);
+      const updatedSourceSelected = (sourceProd.selectedMedia || []).filter(f => f !== fileName);
+      copy[fromProductIdx] = {
+        ...sourceProd,
+        mediaFiles: updatedSourceMedia,
+        selectedMedia: updatedSourceSelected,
+      };
+
+      const targetMedia = targetProd.mediaFiles || [];
+      const updatedTargetMedia = targetMedia.includes(fileName)
+        ? targetMedia
+        : [...targetMedia, fileName];
+
+      copy[targetIdx] = {
+        ...targetProd,
+        mediaFiles: updatedTargetMedia,
+      };
+
+      return copy;
+    });
+
+    setStatusMsg(`Moved image "${fileName}" to SKU "${targetSku}".`);
   };
 
   const connectFolderForThumbnails = async () => {
@@ -508,7 +685,17 @@ export default function WhatsAppSkuParserPage() {
   };
 
   const toggleExpand = (id: string) => {
-    setExpandedId(prev => (prev === id ? null : id));
+    setExpandedIds(prev =>
+      prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]
+    );
+  };
+
+  const toggleExpandAll = () => {
+    if (expandedIds.length === products.length) {
+      setExpandedIds([]);
+    } else {
+      setExpandedIds(products.map(p => p.id));
+    }
   };
 
   const exportToExcel = () => {
@@ -518,9 +705,10 @@ export default function WhatsAppSkuParserPage() {
       'SKU': p.sku,
       'Sale Price': p.salePrice ? Number(p.salePrice) || p.salePrice : '',
       'Cost Price': p.costPrice ? Number(p.costPrice) || p.costPrice : '',
-      'Size': p.size,
+      'Size': p.size || '',
       'Material': p.material,
       'Details': p.workType,
+      'Media Count': (p.mediaFiles || []).length,
     }));
 
     const worksheet = XLSX.utils.json_to_sheet(data);
@@ -610,10 +798,11 @@ export default function WhatsAppSkuParserPage() {
             if (isImage && isSelectedForWatermark && aedDirHandle && qarDirHandle) {
               const padIndex = String(imageCounter).padStart(2, '0');
               const cleanMat = item.material ? `Fabric - ${item.material}` : '';
-              const cleanSize = item.size ? `Size - ${item.size}` : '';
+              const cleanSize = (item.size || '').trim();
+              const sizeInName = cleanSize ? `Size - ${cleanSize}` : '';
 
-              const aedFileName = `${item.sku} - AED ${item.salePrice} (${padIndex}) ${cleanSize} ${cleanMat}.jpg`.replace(/\s+/g, ' ').trim();
-              const qarFileName = `${item.sku} - QAR ${item.salePrice} (${padIndex}) ${cleanSize} ${cleanMat}.jpg`.replace(/\s+/g, ' ').trim();
+              const aedFileName = `${item.sku} - AED ${item.salePrice} (${padIndex}) ${sizeInName} ${cleanMat}.jpg`.replace(/\s+/g, ' ').trim();
+              const qarFileName = `${item.sku} - QAR ${item.salePrice} (${padIndex}) ${sizeInName} ${cleanMat}.jpg`.replace(/\s+/g, ' ').trim();
 
               try {
                 const aedBlob = await createWatermarkedImageBlob(safeBlob, 'AED', item);
@@ -653,13 +842,16 @@ export default function WhatsAppSkuParserPage() {
     }
   };
 
+  const totalOverallMedia = products.reduce((acc, p) => acc + (p.mediaFiles || []).length, 0);
+  const isAllExpanded = products.length > 0 && expandedIds.length === products.length;
+
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b pb-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">WhatsApp Product Chat Parser & Image Organizer</h1>
           <p className="text-sm text-gray-500">
-            Export WhatsApp chat, preview large thumbnails, tick selected images for watermark (AED/QAR) & export Excel.
+            Export WhatsApp chat, preview large thumbnails, reassign images between SKUs, tick for watermark & export Excel.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -689,7 +881,7 @@ export default function WhatsAppSkuParserPage() {
 
       {/* Upload and Filter Controls */}
       <div className="bg-white border rounded-lg p-5 shadow-sm space-y-4">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 items-end">
           <div>
             <label className="block text-xs font-semibold text-gray-700 mb-1">WhatsApp Chat File (.txt)</label>
             <input
@@ -711,8 +903,8 @@ export default function WhatsAppSkuParserPage() {
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1">Load Messages After SKU (Exclusive)</label>
-            <div className="flex gap-2">
+            <label className="block text-xs font-semibold text-gray-700 mb-1">Load After SKU in Chat (Exclusive)</label>
+            <div className="flex gap-1.5">
               <input
                 type="text"
                 placeholder="e.g. KTS101104"
@@ -721,8 +913,33 @@ export default function WhatsAppSkuParserPage() {
                 className="border rounded px-3 py-1.5 w-full text-xs font-mono uppercase focus:ring-1 focus:ring-blue-500"
               />
               <button
+                type="button"
                 onClick={() => processChat()}
                 className="px-3 py-1.5 bg-gray-800 hover:bg-black text-white text-xs font-medium rounded transition"
+              >
+                Filter
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-gray-700 mb-1">
+              Start Assigning SKU From
+            </label>
+            <div className="flex gap-1.5">
+              <input
+                type="text"
+                placeholder="e.g. KTS101105"
+                value={assignStartSku}
+                onChange={(e) => setAssignStartSku(e.target.value)}
+                className="border rounded px-3 py-1.5 w-full text-xs font-mono uppercase focus:ring-1 focus:ring-indigo-500"
+              />
+              <button
+                type="button"
+                onClick={applySequentialSkuReorder}
+                disabled={products.length === 0 || !assignStartSku.trim()}
+                className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium rounded transition disabled:opacity-50"
+                title="Renumber current list with this SKU"
               >
                 Apply
               </button>
@@ -737,229 +954,275 @@ export default function WhatsAppSkuParserPage() {
         )}
       </div>
 
-      {/* Product Table */}
+      {/* Product Table Header with Expand/Collapse All and Counts */}
       {products.length > 0 && (
-        <div className="bg-white border rounded-lg shadow-sm overflow-x-auto">
-          <table className="w-full text-left text-sm border-collapse">
-            <thead className="bg-gray-50 border-b text-gray-700 font-semibold uppercase text-xs">
-              <tr>
-                <th className="p-3 w-10">#</th>
-                <th className="p-3">SKU</th>
-                <th className="p-3">Sale Price</th>
-                <th className="p-3">Cost Price</th>
-                <th className="p-3">Size (Numeric Range)</th>
-                <th className="p-3">Material</th>
-                <th className="p-3">Details (KTS Embroidery)</th>
-                <th className="p-3">Watermark Targets</th>
-                <th className="p-3 text-center w-16">Preview</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y text-gray-800">
-              {products.map((item, idx) => {
-                const isExpanded = expandedId === item.id;
-                const selectedCount = (item.selectedMedia || []).length;
-                const totalCount = (item.mediaFiles || []).length;
+        <div className="bg-white border rounded-lg shadow-sm overflow-hidden">
+          <div className="px-4 py-3 bg-gray-50 border-b flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-4">
+              <span className="font-bold text-gray-700">
+                Products: <span className="text-blue-600 font-mono text-sm">{products.length}</span>
+              </span>
+              <span className="font-bold text-gray-700">
+                Total Media Files: <span className="text-indigo-600 font-mono text-sm">{totalOverallMedia}</span>
+              </span>
+            </div>
 
-                return (
-                  <React.Fragment key={item.id}>
-                    <tr className={`hover:bg-gray-50 ${isExpanded ? 'bg-blue-50/30' : ''}`}>
-                      <td className="p-3 text-gray-400 font-mono text-xs">{idx + 1}</td>
-                      <td className="p-2">
-                        <input
-                          type="text"
-                          value={item.sku}
-                          onChange={(e) => handleFieldChange(idx, 'sku', e.target.value)}
-                          className="border rounded px-2 py-1 w-28 font-mono text-xs font-semibold focus:ring-1 focus:ring-blue-500"
-                        />
-                      </td>
-                      <td className="p-2">
-                        <input
-                          type="text"
-                          value={item.salePrice}
-                          onChange={(e) => handleFieldChange(idx, 'salePrice', e.target.value)}
-                          className="border rounded px-2 py-1 w-20 text-xs font-medium text-emerald-700"
-                        />
-                      </td>
-                      <td className="p-2">
-                        <input
-                          type="text"
-                          value={item.costPrice}
-                          onChange={(e) => handleFieldChange(idx, 'costPrice', e.target.value)}
-                          className="border rounded px-2 py-1 w-20 text-xs"
-                        />
-                      </td>
-                      <td className="p-2">
-                        <input
-                          type="text"
-                          value={item.size}
-                          onChange={(e) => handleFieldChange(idx, 'size', e.target.value)}
-                          className="border rounded px-2 py-1 w-32 text-xs font-mono font-medium"
-                        />
-                      </td>
-                      <td className="p-2">
-                        <input
-                          type="text"
-                          value={item.material}
-                          onChange={(e) => handleFieldChange(idx, 'material', e.target.value)}
-                          className="border rounded px-2 py-1 w-32 text-xs"
-                        />
-                      </td>
-                      <td className="p-2">
-                        <input
-                          type="text"
-                          value={item.workType}
-                          onChange={(e) => handleFieldChange(idx, 'workType', e.target.value)}
-                          placeholder={item.supplierCode.includes('KTS') ? 'KTS Embroidery' : '-'}
-                          className="border rounded px-2 py-1 w-48 text-xs"
-                        />
-                      </td>
-                      <td className="p-3 text-xs">
-                        <span
-                          className={`inline-block px-2 py-0.5 rounded font-mono font-semibold ${
-                            selectedCount > 0
-                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                              : 'bg-amber-50 text-amber-700 border border-amber-200'
-                          }`}
-                        >
-                          {selectedCount > 0 ? `${selectedCount} selected` : 'None (Move Only)'}
-                        </span>
-                      </td>
-                      <td className="p-2 text-center">
-                        <button
-                          type="button"
-                          onClick={() => toggleExpand(item.id)}
-                          className={`w-7 h-7 rounded border font-bold flex items-center justify-center transition ${
-                            isExpanded
-                              ? 'bg-blue-600 text-white border-blue-600'
-                              : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'
-                          }`}
-                          title="Open Image Previews & Selection"
-                        >
-                          {isExpanded ? '−' : '+'}
-                        </button>
-                      </td>
-                    </tr>
+            <button
+              type="button"
+              onClick={toggleExpandAll}
+              className="px-3 py-1.5 bg-white border border-gray-300 hover:bg-gray-100 rounded font-semibold text-gray-700 transition shadow-sm flex items-center gap-1.5"
+            >
+              <span>{isAllExpanded ? '− Collapse All' : '+ Expand All'}</span>
+              <span className="text-gray-400 font-mono text-[10px]">
+                ({expandedIds.length}/{products.length})
+              </span>
+            </button>
+          </div>
 
-                    {/* Expandable Section: Large Image Thumbnails + Selector */}
-                    {isExpanded && (
-                      <tr className="bg-slate-50 border-y">
-                        <td colSpan={9} className="p-4">
-                          <div className="bg-white border rounded p-4 text-xs text-gray-700 space-y-4 shadow-sm">
-                            <div>
-                              <div className="flex justify-between items-center pb-2 border-b mb-3">
-                                <div>
-                                  <span className="font-bold text-gray-800 text-sm">
-                                    Click Images to Select for Watermark (AED & QAR)
-                                  </span>
-                                  <span className="text-gray-400 ml-2 text-xs">
-                                    ({selectedCount} of {totalCount} selected)
-                                  </span>
-                                </div>
-                                <div className="space-x-2">
-                                  <button
-                                    type="button"
-                                    onClick={() => setAllMediaSelection(idx, true)}
-                                    className="px-2.5 py-1 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded text-xs font-medium"
-                                  >
-                                    Select All
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => setAllMediaSelection(idx, false)}
-                                    className="px-2.5 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded text-xs font-medium"
-                                  >
-                                    Deselect All
-                                  </button>
-                                </div>
-                              </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm border-collapse">
+              <thead className="bg-gray-100/70 border-b text-gray-700 font-semibold uppercase text-xs">
+                <tr>
+                  <th className="p-3 w-10">#</th>
+                  <th className="p-3">SKU</th>
+                  <th className="p-3">Sale Price</th>
+                  <th className="p-3">Cost Price</th>
+                  <th className="p-3">Size (Numeric Range)</th>
+                  <th className="p-3">Material</th>
+                  <th className="p-3">Details (KTS Embroidery)</th>
+                  <th className="p-3">Watermark Targets</th>
+                  <th className="p-3 text-center w-24">Preview</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y text-gray-800">
+                {products.map((item, idx) => {
+                  const isExpanded = expandedIds.includes(item.id);
+                  const selectedCount = (item.selectedMedia || []).length;
+                  const totalCount = (item.mediaFiles || []).length;
 
-                              {/* Large Thumbnail Grid (h-56) */}
-                              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3.5">
-                                {(item.mediaFiles || []).map((fileName, fIdx) => {
-                                  const isSelected = (item.selectedMedia || []).includes(fileName);
-                                  const thumbUrl = thumbnails[fileName];
-                                  const isVideo = fileName.endsWith('.mp4');
-
-                                  return (
-                                    <div
-                                      key={fIdx}
-                                      onClick={() => !isVideo && toggleMediaSelection(idx, fileName)}
-                                      className={`relative group rounded-lg border-2 overflow-hidden flex flex-col cursor-pointer transition ${
-                                        isSelected
-                                          ? 'border-emerald-500 ring-2 ring-emerald-300 shadow-md bg-emerald-50/10'
-                                          : 'border-gray-200 bg-gray-50 hover:border-gray-400'
-                                      }`}
-                                    >
-                                      {/* Large Preview Area */}
-                                      <div className="w-full h-56 bg-gray-100 flex items-center justify-center overflow-hidden relative">
-                                        {thumbUrl ? (
-                                          <img
-                                            src={thumbUrl}
-                                            alt={fileName}
-                                            className="w-full h-full object-cover transition duration-150 group-hover:scale-105"
-                                          />
-                                        ) : (
-                                          <div className="text-center p-3 text-gray-400">
-                                            {isVideo ? (
-                                              <span className="text-2xl block mb-1">🎥</span>
-                                            ) : (
-                                              <span className="text-2xl block mb-1">🖼️</span>
-                                            )}
-                                            <span className="text-xs font-medium">
-                                              {isVideo ? 'Video File' : 'No Preview'}
-                                            </span>
-                                            {!isVideo && (
-                                              <span className="block text-[10px] text-gray-400 mt-1">
-                                                Click "Connect Folder"
-                                              </span>
-                                            )}
-                                          </div>
-                                        )}
-
-                                        {/* Floating Checkbox Badge */}
-                                        {!isVideo && (
-                                          <div className="absolute top-2 left-2 bg-white/95 backdrop-blur rounded-md px-2 py-1 shadow flex items-center gap-1.5 border">
-                                            <input
-                                              type="checkbox"
-                                              checked={isSelected}
-                                              onChange={() => toggleMediaSelection(idx, fileName)}
-                                              onClick={(e) => e.stopPropagation()}
-                                              className="w-4 h-4 text-emerald-600 rounded focus:ring-emerald-500 cursor-pointer"
-                                            />
-                                            <span className="text-[11px] font-bold text-gray-700">
-                                              {isSelected ? 'Watermark' : 'Skip'}
-                                            </span>
-                                          </div>
-                                        )}
-                                      </div>
-
-                                      <div className="p-2 text-center bg-white border-t">
-                                        <p className="truncate text-xs font-mono text-gray-700 font-medium" title={fileName}>
-                                          {fileName}
-                                        </p>
-                                      </div>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </div>
-
-                            {/* Raw Description */}
-                            <div className="border-t pt-3">
-                              <span className="font-semibold text-gray-500 block mb-1">Raw WhatsApp Message</span>
-                              <pre className="font-mono whitespace-pre-wrap leading-relaxed max-h-40 overflow-y-auto bg-gray-50 p-2.5 rounded border text-[11px]">
-                                {item.rawDescription}
-                              </pre>
-                            </div>
+                  return (
+                    <React.Fragment key={item.id}>
+                      <tr className={`hover:bg-gray-50 ${isExpanded ? 'bg-blue-50/30' : ''}`}>
+                        <td className="p-3 text-gray-400 font-mono text-xs">{idx + 1}</td>
+                        <td className="p-2">
+                          <input
+                            type="text"
+                            value={item.sku}
+                            onChange={(e) => handleFieldChange(idx, 'sku', e.target.value)}
+                            className="border rounded px-2 py-1 w-28 font-mono text-xs font-semibold focus:ring-1 focus:ring-blue-500"
+                          />
+                        </td>
+                        <td className="p-2">
+                          <input
+                            type="text"
+                            value={item.salePrice}
+                            onChange={(e) => handleFieldChange(idx, 'salePrice', e.target.value)}
+                            className="border rounded px-2 py-1 w-20 text-xs font-medium text-emerald-700"
+                          />
+                        </td>
+                        <td className="p-2">
+                          <input
+                            type="text"
+                            value={item.costPrice}
+                            onChange={(e) => handleFieldChange(idx, 'costPrice', e.target.value)}
+                            className="border rounded px-2 py-1 w-20 text-xs"
+                          />
+                        </td>
+                        <td className="p-2">
+                          <input
+                            type="text"
+                            value={item.size}
+                            onChange={(e) => handleFieldChange(idx, 'size', e.target.value)}
+                            className="border rounded px-2 py-1 w-32 text-xs font-mono font-medium"
+                          />
+                        </td>
+                        <td className="p-2">
+                          <input
+                            type="text"
+                            value={item.material}
+                            onChange={(e) => handleFieldChange(idx, 'material', e.target.value)}
+                            className="border rounded px-2 py-1 w-32 text-xs"
+                          />
+                        </td>
+                        <td className="p-2">
+                          <input
+                            type="text"
+                            value={item.workType}
+                            onChange={(e) => handleFieldChange(idx, 'workType', e.target.value)}
+                            placeholder={item.supplierCode.includes('KTS') ? 'KTS Embroidery' : '-'}
+                            className="border rounded px-2 py-1 w-48 text-xs"
+                          />
+                        </td>
+                        <td className="p-3 text-xs">
+                          <div className="flex flex-col gap-0.5">
+                            <span
+                              className={`inline-block px-2 py-0.5 rounded font-mono font-semibold w-fit ${
+                                selectedCount > 0
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  : 'bg-amber-50 text-amber-700 border border-amber-200'
+                              }`}
+                            >
+                              {selectedCount > 0 ? `${selectedCount} selected` : 'None (Move Only)'}
+                            </span>
+                            <span className="text-[11px] text-gray-500 font-mono">
+                              Total: <b>{totalCount}</b> file{totalCount !== 1 ? 's' : ''}
+                            </span>
                           </div>
                         </td>
+                        <td className="p-2 text-center">
+                          <button
+                            type="button"
+                            onClick={() => toggleExpand(item.id)}
+                            className={`px-2.5 py-1 rounded border font-bold flex items-center justify-center gap-1 mx-auto transition text-xs ${
+                              isExpanded
+                                ? 'bg-blue-600 text-white border-blue-600'
+                                : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'
+                            }`}
+                            title="Open Image Previews & Selection"
+                          >
+                            <span>{isExpanded ? '−' : '+'}</span>
+                            <span className="text-[10px] font-mono">({totalCount})</span>
+                          </button>
+                        </td>
                       </tr>
-                    )}
-                  </React.Fragment>
-                );
-              })}
-            </tbody>
-          </table>
+
+                      {/* Expandable Section: Large Image Thumbnails + Selector */}
+                      {isExpanded && (
+                        <tr className="bg-slate-50 border-y">
+                          <td colSpan={9} className="p-4">
+                            <div className="bg-white border rounded p-4 text-xs text-gray-700 space-y-4 shadow-sm">
+                              <div>
+                                <div className="flex justify-between items-center pb-2 border-b mb-3">
+                                  <div>
+                                    <span className="font-bold text-gray-800 text-sm">
+                                      Click Images to Select for Watermark (AED & QAR)
+                                    </span>
+                                    <span className="text-gray-500 ml-2 text-xs font-mono font-medium">
+                                      ({selectedCount} of {totalCount} selected)
+                                    </span>
+                                  </div>
+                                  <div className="space-x-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => setAllMediaSelection(idx, true)}
+                                      className="px-2.5 py-1 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded text-xs font-medium"
+                                    >
+                                      Select All
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setAllMediaSelection(idx, false)}
+                                      className="px-2.5 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded text-xs font-medium"
+                                    >
+                                      Deselect All
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {/* Large Thumbnail Grid (h-56) */}
+                                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3.5">
+                                  {(item.mediaFiles || []).map((fileName, fIdx) => {
+                                    const isSelected = (item.selectedMedia || []).includes(fileName);
+                                    const thumbUrl = thumbnails[fileName];
+                                    const isVideo = fileName.endsWith('.mp4');
+
+                                    return (
+                                      <div
+                                        key={fIdx}
+                                        onClick={() => !isVideo && toggleMediaSelection(idx, fileName)}
+                                        className={`relative group rounded-lg border-2 overflow-hidden flex flex-col cursor-pointer transition ${
+                                          isSelected
+                                            ? 'border-emerald-500 ring-2 ring-emerald-300 shadow-md bg-emerald-50/10'
+                                            : 'border-gray-200 bg-gray-50 hover:border-gray-400'
+                                        }`}
+                                      >
+                                        {/* Large Preview Area */}
+                                        <div className="w-full h-56 bg-gray-100 flex items-center justify-center overflow-hidden relative">
+                                          {thumbUrl ? (
+                                            <img
+                                              src={thumbUrl}
+                                              alt={fileName}
+                                              className="w-full h-full object-cover transition duration-150 group-hover:scale-105"
+                                            />
+                                          ) : (
+                                            <div className="text-center p-3 text-gray-400">
+                                              {isVideo ? (
+                                                <span className="text-2xl block mb-1">🎥</span>
+                                              ) : (
+                                                <span className="text-2xl block mb-1">🖼️</span>
+                                              )}
+                                              <span className="text-xs font-medium">
+                                                {isVideo ? 'Video File' : 'No Preview'}
+                                              </span>
+                                              {!isVideo && (
+                                                <span className="block text-[10px] text-gray-400 mt-1">
+                                                  Click "Connect Folder"
+                                                </span>
+                                              )}
+                                            </div>
+                                          )}
+
+                                          {/* Floating Checkbox Badge */}
+                                          {!isVideo && (
+                                            <div className="absolute top-2 left-2 bg-white/95 backdrop-blur rounded-md px-2 py-1 shadow flex items-center gap-1.5 border">
+                                              <input
+                                                type="checkbox"
+                                                checked={isSelected}
+                                                onChange={() => toggleMediaSelection(idx, fileName)}
+                                                onClick={(e) => e.stopPropagation()}
+                                                className="w-4 h-4 text-emerald-600 rounded focus:ring-emerald-500 cursor-pointer"
+                                              />
+                                              <span className="text-[11px] font-bold text-gray-700">
+                                                {isSelected ? 'Watermark' : 'Skip'}
+                                              </span>
+                                            </div>
+                                          )}
+                                        </div>
+
+                                        {/* Card Footer: Filename + Move to SKU Dropdown */}
+                                        <div className="p-2 bg-white border-t space-y-1.5" onClick={(e) => e.stopPropagation()}>
+                                          <p className="truncate text-xs font-mono text-gray-700 font-medium text-center" title={fileName}>
+                                            {fileName}
+                                          </p>
+                                          <div className="flex items-center gap-1 pt-1 border-t border-gray-100">
+                                            <label className="text-[10px] text-gray-400 font-semibold uppercase shrink-0">SKU:</label>
+                                            <select
+                                              value={item.sku}
+                                              onChange={(e) => moveMediaToSku(idx, fileName, e.target.value)}
+                                              className="w-full text-[11px] font-mono bg-gray-50 border border-gray-300 rounded px-1.5 py-0.5 text-gray-700 focus:bg-white focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                                              title="Reassign image to another SKU"
+                                            >
+                                              {products.map((p) => (
+                                                <option key={p.id} value={p.sku}>
+                                                  {p.sku} {p.sku === item.sku ? '(Current)' : ''}
+                                                </option>
+                                              ))}
+                                            </select>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+
+                              {/* Raw Description */}
+                              <div className="border-t pt-3">
+                                <span className="font-semibold text-gray-500 block mb-1">Raw WhatsApp Message</span>
+                                <pre className="font-mono whitespace-pre-wrap leading-relaxed max-h-40 overflow-y-auto bg-gray-50 p-2.5 rounded border text-[11px]">
+                                  {item.rawDescription}
+                                </pre>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>
