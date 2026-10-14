@@ -255,6 +255,15 @@ export default function Sidebar() {
     },
     {
       show:
+        !isEmployeeRole &&
+        session?.role !== "Supplier" &&
+        (isAdmin || Boolean(permission?.canReports)),
+      href: "/reports/instock",
+      label: "In-Stock Items",
+      icon: PackageCheck,
+    },
+    {
+      show:
         session?.role !== "Supplier" &&
         (isAdmin ||
           Boolean(
@@ -525,6 +534,7 @@ export default function Sidebar() {
     ),
     [
       "/reports",
+      "/reports/instock",
       "/reports/doha-receiving",
       "/reports/cod",
       "/reports/pending",
