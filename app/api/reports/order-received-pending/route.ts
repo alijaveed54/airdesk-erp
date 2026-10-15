@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import {
   airtableHeaders,
   airtableUrl,
@@ -138,6 +138,15 @@ function getReason(item: OrderItem) {
   if (
     isDateBill(billNo) &&
     wh &&
+    !uae
+  ) {
+    return `Supplier Dispatched on ${billNo} — UAE not yet received`;
+  }
+
+  // Rule 5
+  if (
+    isDateBill(billNo) &&
+    wh &&
     uae
   ) {
     return `Item received in UAE`;
@@ -237,7 +246,9 @@ function findField(
 async function fetchOrderRecords(
   airtable: any,
   tableName: string,
-  fields: string[]
+  fields: string[],
+  statusFilter: string = "",
+  statusFieldName: string = "Order_status"
 ) {
 
   const records: AirtableRecord[] = [];
@@ -256,11 +267,13 @@ async function fetchOrderRecords(
       "100"
     );
 
-
- params.set(
-  "filterByFormula",
-  "FIND('Order Received',{Order_status})"
-);
+    if (statusFilter && statusFilter.toLowerCase() !== "all") {
+      const escapedStatus = statusFilter.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+      params.set(
+        "filterByFormula",
+        `FIND(LOWER('${escapedStatus}'), LOWER({${statusFieldName}} & '')) > 0`
+      );
+    }
 
     fields.forEach(
       (field) =>
@@ -640,6 +653,17 @@ itemDetail:
         ]
       ),
 
+    orderStatus:
+      findField(
+        fields,
+        [
+          "Order_status",
+          "order_status",
+          "Order Status",
+          "Status"
+        ]
+      ),
+
   };
 
 }
@@ -647,7 +671,7 @@ itemDetail:
 // API GET
 // ===============================
 
-export async function GET() {
+export async function GET(request: NextRequest) {
 
   try {
 
@@ -655,7 +679,8 @@ export async function GET() {
     const airtable =
       await getCurrentAirtableBase();
 
-
+    const { searchParams } = new URL(request.url);
+    const statusParam = (searchParams.get("status") || "").trim();
 
     const schemaResponse = await fetch(
       `https://api.airtable.com/v0/meta/bases/${airtable.baseId}/tables`,
@@ -670,7 +695,7 @@ export async function GET() {
     const schemaData = await schemaResponse.json();
 
     const table =
-      schemaData.tables.find(
+      schemaData.tables?.find(
         (t: any) =>
           t.name === "BS Order Entry" ||
           t.name === "BS Invoice" ||
@@ -690,7 +715,7 @@ export async function GET() {
     const fieldMap =
       getOrderFields(table);
 
-
+    const statusFieldName = fieldMap.orderStatus || "Order_status";
 
     const requiredFields =
       [
@@ -698,11 +723,13 @@ export async function GET() {
         fieldMap.customer,
         fieldMap.date,
         fieldMap.itemCode,
+        fieldMap.itemDetail,
         fieldMap.quantity,
         fieldMap.supplier,
         fieldMap.billNo,
         fieldMap.receivedWH,
         fieldMap.receivedUAE,
+        fieldMap.orderStatus,
       ].filter(Boolean);
 
 
@@ -711,7 +738,9 @@ export async function GET() {
       await fetchOrderRecords(
         airtable,
         tableName,
-        requiredFields
+        requiredFields,
+        statusParam,
+        statusFieldName
       );
 
 

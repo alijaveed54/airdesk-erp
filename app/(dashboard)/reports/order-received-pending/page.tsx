@@ -14,6 +14,7 @@ type PendingOrderRow = {
   receivedWh: string;
   reason: string;
   line: string;
+  copyText?: string;
 };
 
 export default function OrderReceivedPendingPage() {
@@ -21,13 +22,37 @@ export default function OrderReceivedPendingPage() {
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [copied, setCopied] = useState("");
+  const [status, setStatus] = useState<string>("Order Received");
+  const [statusOptions, setStatusOptions] = useState<string[]>([]);
 
-  async function loadReport() {
+  // 1. Orders List waly endpoint (/api/orders/list) se exact status options pick karein
+  useEffect(() => {
+    async function loadStatusOptionsFromOrderList() {
+      try {
+        const res = await fetch("/api/orders/list?pageSize=1", { cache: "no-store" });
+        const data = await res.json();
+        if (res.ok && data.success && Array.isArray(data.statusOptions)) {
+          setStatusOptions(data.statusOptions);
+        }
+      } catch (err) {
+        console.error("Failed to load status options from order list API:", err);
+      }
+    }
+
+    loadStatusOptionsFromOrderList();
+  }, []);
+
+  async function loadReport(selectedStatus = status) {
     setLoading(true);
 
     try {
+      const params = new URLSearchParams();
+      if (selectedStatus && selectedStatus !== "all") {
+        params.set("status", selectedStatus);
+      }
+
       const response = await fetch(
-        "/api/reports/order-received-pending",
+        `/api/reports/order-received-pending?${params.toString()}`,
         {
           cache: "no-store",
         }
@@ -54,7 +79,7 @@ export default function OrderReceivedPendingPage() {
   }
 
   useEffect(() => {
-    loadReport();
+    loadReport("Order Received");
   }, []);
 
   async function copyLine(
@@ -90,11 +115,11 @@ export default function OrderReceivedPendingPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-black text-slate-950">
-            Order Received Pending Reason
+            Order Pending Reason Report
           </h1>
 
           <p className="mt-1 text-sm font-bold text-slate-500">
-            Only Order Received orders pending for processing.
+            Orders pending for processing filtered by order status.
           </p>
         </div>
 
@@ -105,10 +130,10 @@ export default function OrderReceivedPendingPage() {
           Back
         </Link>
       </div>
-       id="page-part-2"
+
       <div className="rounded-3xl border bg-white p-5 shadow-sm">
 
-        <div className="flex gap-3 mb-5">
+        <div className="flex flex-wrap gap-3 mb-5 items-center">
 
           <input
             type="text"
@@ -118,18 +143,43 @@ export default function OrderReceivedPendingPage() {
               setSearch(e.target.value)
             }
             className="
-              h-11 flex-1 rounded-xl
+              h-11 flex-1 min-w-[220px] rounded-xl
               border px-4 font-bold
             "
           />
 
+          <div className="flex items-center gap-2">
+            <label className="text-xs font-black text-slate-500">Status:</label>
+            <select
+              value={status}
+              onChange={(e) => {
+                const newStatus = e.target.value;
+                setStatus(newStatus);
+                loadReport(newStatus);
+              }}
+              className="
+                h-11 rounded-xl
+                border border-slate-300 bg-white
+                px-3 font-bold text-slate-800
+                focus:border-blue-500 focus:outline-none
+              "
+            >
+              <option value="all">All Statuses</option>
+              {statusOptions.map((opt) => (
+                <option key={opt} value={opt}>
+                  {opt}
+                </option>
+              ))}
+            </select>
+          </div>
+
           <button
             type="button"
-            onClick={loadReport}
+            onClick={() => loadReport(status)}
             disabled={loading}
             className="
               rounded-xl bg-blue-600
-              px-5 font-black text-white
+              px-5 h-11 font-black text-white
               disabled:opacity-50
             "
           >
@@ -143,13 +193,13 @@ export default function OrderReceivedPendingPage() {
 
         <div className="space-y-3">
 
-          {filteredRows.length === 0 && (
+          {filteredRows.length === 0 && !loading && (
             <div className="
               rounded-xl border
               p-5 text-center
               font-bold text-slate-500
             ">
-              No Order Received pending orders found.
+              No matching orders found.
             </div>
           )}
 
@@ -181,7 +231,7 @@ export default function OrderReceivedPendingPage() {
               <button
                 type="button"
                 onClick={() =>
-                  copyLine(row.line)
+                  copyLine(row.copyText || row.line)
                 }
                 className="
                   shrink-0 rounded-lg
@@ -191,7 +241,7 @@ export default function OrderReceivedPendingPage() {
                   text-white
                 "
               >
-                {copied === row.line
+                {copied === (row.copyText || row.line)
                   ? "Copied"
                   : "Copy"}
               </button>
