@@ -180,8 +180,6 @@ export default function Sidebar() {
   const canR2Upload = Boolean(session) && !isSupplier && !isEmployeeRole;
   const canImages = isAdmin || isManager || isEmployee;
   const canSkuParser = (isAdmin || isManager || isEmployee) && !isSupplier;
-  const canWhatsAppImport =
-    (isAdmin || isManager || isEmployee) && !isEmployeeRole;
   const canFacebookPages = isAdmin;
   const canFacebookPost = isAdmin || isManager || isEmployee;
   const canFacebook = canFacebookPages || canFacebookPost;
@@ -854,17 +852,6 @@ export default function Sidebar() {
                 </Link>
               )}
 
-              {canImages && (
-                <Link
-                  href="/images/product-generator"
-                  title={isCollapsed ? "Product Image Generator" : undefined}
-                  className={navLinkClass("/images/product-generator")}
-                >
-                  <Sparkles size={18} className="shrink-0" />
-                  {!isCollapsed && <span>Product Image Generator</span>}
-                </Link>
-              )}
-
               {canSkuParser && (
                 <Link
                   href="/tools/whatsapp-sku-parser"
@@ -889,32 +876,12 @@ export default function Sidebar() {
             </>
           )}
 
-          {(supplierNav.length > 0 || canWhatsAppImport) && (
+          {supplierNav.length > 0 && (
             <>
               {renderSectionLabel("Suppliers")}
               {renderNavItems(supplierPrimaryNav)}
 
-              {canWhatsAppImport && (
-                <Link
-                  href="/whatsapp/supplier-import"
-                  title={isCollapsed ? "WhatsApp Supplier Import" : undefined}
-                  className={navLinkClass("/whatsapp/supplier-import")}
-                >
-                  <MessageCircle size={18} className="shrink-0" />
-                  {!isCollapsed && <span>WhatsApp Supplier Import</span>}
-                </Link>
-              )}
-
-              {isAdmin && (
-                <Link
-                  href="/timelines"
-                  title={isCollapsed ? "Timelines" : undefined}
-                  className={navLinkClass("/timelines")}
-                >
-                  <MessageCircle size={18} className="shrink-0" />
-                  {!isCollapsed && <span>Timelines</span>}
-                </Link>
-              )}
+              
 
               {renderNavItems(supplierReportNav)}
             </>
@@ -978,7 +945,7 @@ export default function Sidebar() {
                           )}
                         >
                           <span className="h-2 w-2 rounded-full bg-current" />
-                            Create Post
+                          Create Post
                         </Link>
 
                         <Link
