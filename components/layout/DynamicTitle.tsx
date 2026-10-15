@@ -24,7 +24,7 @@ export default function DynamicTitle() {
       const h1Text = h1Element?.textContent?.trim();
 
       if (h1Text && h1Text.length > 1 && h1Text.length < 60) {
-        document.title = `Mysmar Airdesk ERP - ${h1Text}`;
+        document.title = `${h1Text} - Mysmar Airdesk ERP`;
         return;
       }
 
@@ -38,10 +38,9 @@ export default function DynamicTitle() {
       const lastSegment = segments[segments.length - 1];
       const pageTitle = formatSlug(lastSegment);
 
-      document.title = `Mysmar Airdesk ERP - ${pageTitle}`;
+      document.title = `${pageTitle} - Mysmar Airdesk ERP`;
     };
 
-    // React render hone ke baad microtask mein run karein taake h1 load ho chuka ho
     const timer = setTimeout(updateTitle, 100);
 
     return () => clearTimeout(timer);
