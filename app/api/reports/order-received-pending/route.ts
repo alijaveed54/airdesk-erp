@@ -138,15 +138,6 @@ function getReason(item: OrderItem) {
   if (
     isDateBill(billNo) &&
     wh &&
-    !uae
-  ) {
-    return `Supplier Dispatched on ${billNo} — UAE not yet received`;
-  }
-
-  // Rule 5
-  if (
-    isDateBill(billNo) &&
-    wh &&
     uae
   ) {
     return `Item received in UAE`;
@@ -155,6 +146,27 @@ function getReason(item: OrderItem) {
 
   return "Processing pending";
 }
+
+function formatItemSkuText(itemCode: string, itemDetail: string): string {
+  const code = itemCode.trim();
+  const detail = itemDetail.trim();
+
+  if (!detail) {
+    return code;
+  }
+
+  if (!code) {
+    return detail;
+  }
+
+  // Agar itemDetail ke andar pehle se hi SKU/itemCode mojood hai toh repeat na karein
+  if (detail.toLowerCase().includes(code.toLowerCase())) {
+    return detail;
+  }
+
+  return `${code} | ${detail}`;
+}
+
 // ===============================
 // Airtable Schema Helpers
 // ===============================
@@ -460,12 +472,8 @@ function createReportRows(
     const reason =
       getReason(item);
 
-
     const skuText =
-      item.itemDetail
-        ? `${item.itemCode} | ${item.itemDetail}`
-        : item.itemCode;
-
+      formatItemSkuText(item.itemCode, item.itemDetail);
 
     return `${skuText}
 Status: ${reason}`;
@@ -486,10 +494,7 @@ ${itemLines.join("\n\n")}`;
 ${order.items
   .map(
     (item) =>
-`${item.itemDetail 
- ? `${item.itemCode} | ${item.itemDetail}` 
- : item.itemCode
-} - ${getReason(item)}`
+`${formatItemSkuText(item.itemCode, item.itemDetail)} -${getReason(item)}`
   )
   .join("\n")}`;
 
@@ -527,8 +532,6 @@ ${order.items
   });
 
 } 
-
-  
 
 
 
