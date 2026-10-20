@@ -89,7 +89,7 @@ function exportSingleReport(report: BaseReport, month: string) {
       Pending: row.pending,
       "Pending Value": Number(row.pendingValue.toFixed(2)),
       Delivered: row.delivered,
-      "Delivered Value": Number(row.deliveredValue.toFixed(2)),
+      "COD Amount": Number(row.deliveredValue.toFixed(2)),
       Dispatched: row.dispatched,
       "Dispatched Value": Number(row.dispatchedValue.toFixed(2)),
       Returned: row.returned,
@@ -104,7 +104,7 @@ function exportSingleReport(report: BaseReport, month: string) {
       Pending: report.summary.pending,
       "Pending Value": Number(report.summary.pendingValue.toFixed(2)),
       Delivered: report.summary.delivered,
-      "Delivered Value": Number(report.summary.deliveredValue.toFixed(2)),
+      "COD Amount": Number(report.summary.deliveredValue.toFixed(2)),
       Dispatched: report.summary.dispatched,
       "Dispatched Value": Number(report.summary.dispatchedValue.toFixed(2)),
       Returned: report.summary.returned,
@@ -235,7 +235,7 @@ export default function ReportsPage() {
             row.pendingValue.toFixed(2)
           ),
           Delivered: row.delivered,
-          "Delivered Value": Number(
+          "COD Amount": Number(
             row.deliveredValue.toFixed(2)
           ),
           Dispatched: row.dispatched,
@@ -262,7 +262,7 @@ export default function ReportsPage() {
             report.summary.pendingValue.toFixed(2)
           ),
           Delivered: report.summary.delivered,
-          "Delivered Value": Number(
+          "COD Amount": Number(
             report.summary.deliveredValue.toFixed(2)
           ),
           Dispatched: report.summary.dispatched,
@@ -315,7 +315,7 @@ export default function ReportsPage() {
           summary.pendingValue.toFixed(2)
         ),
         Delivered: summary.delivered,
-        "Delivered Value": Number(
+        "COD Amount": Number(
           summary.deliveredValue.toFixed(2)
         ),
         Dispatched: summary.dispatched,
@@ -539,7 +539,7 @@ function BaseReportBlock({
                 Delivered
               </th>
               <th className="px-4 py-3 text-right">
-                Value
+                COD Amount
               </th>
               <th className="px-4 py-3 text-center">
                 Dispatched

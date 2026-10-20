@@ -379,6 +379,7 @@ export async function GET(request: Request) {
           "store",
         ]);
 
+        // RESTORED: Main value field exactly as it was in original source
         const valueField = getFieldName(schemaFields, [
           "total_order_value",
           "Total Order Value",
@@ -386,10 +387,11 @@ export async function GET(request: Request) {
           "Grand Total",
           "Order Total",
           "Bill Value",
+          "COD Amount",
           "Total",
         ]);
 
-        // Added COD Amount field specifically for Delivered logic
+        // NEW: Specific field for Delivered COD value 
         const codAmountField = getFieldName(schemaFields, [
           "cod_amount",
           "COD Amount",
@@ -459,7 +461,7 @@ export async function GET(request: Request) {
             
           const codValue = codAmountField
             ? numberValue(fields[codAmountField])
-            : value; // Fallback to normal value if COD field is missing in schema
+            : value;
 
           if (!baseRows.has(storeName)) {
             baseRows.set(storeName, emptyStoreRow(storeName));
@@ -468,12 +470,11 @@ export async function GET(request: Request) {
           const row = baseRows.get(storeName)!;
 
           row.orders += 1;
-          row.value += value;
+          row.value += value; // Original functionality preserved for overall total
 
           if (status.includes("deliver")) {
             row.delivered += 1;
-            // Picking COD Amount strictly for delivered orders
-            row.deliveredValue += codValue; 
+            row.deliveredValue += codValue; // Only Delivered orders use the exact COD amount
           } else if (status.includes("dispatch")) {
             row.dispatched += 1;
             row.dispatchedValue += value;
