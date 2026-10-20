@@ -31,6 +31,8 @@ import {
   FileSpreadsheet,
 } from "lucide-react";
 
+// Static review only — not runtime-tested.
+
 type Session = {
   role: string;
   superAdmin?: boolean;
@@ -240,6 +242,14 @@ export default function Sidebar() {
       show: isAdmin || Boolean(permission?.canReports),
       href: "/reports",
       label: "Reports Home",
+      icon: BarChart3,
+    },
+    {
+      show:
+        session?.role !== "Supplier" &&
+        (isAdmin || Boolean(permission?.canReports)),
+      href: "/reports/overall-sales-purchase",
+      label: "Overall Sales & Purchase",
       icon: BarChart3,
     },
     {
@@ -532,6 +542,7 @@ export default function Sidebar() {
     ),
     [
       "/reports",
+      "/reports/overall-sales-purchase",
       "/reports/instock",
       "/reports/doha-receiving",
       "/reports/cod",
@@ -880,9 +891,6 @@ export default function Sidebar() {
             <>
               {renderSectionLabel("Suppliers")}
               {renderNavItems(supplierPrimaryNav)}
-
-              
-
               {renderNavItems(supplierReportNav)}
             </>
           )}

@@ -23,23 +23,6 @@ type SchemaTable = {
   fields?: SchemaField[];
 };
 
-const SCHEMA_CACHE_TTL_MS = 5 * 60 * 1000;
-const schemaCache = new Map<
-  string,
-  { tables: SchemaTable[]; expiresAt: number }
->();
-const schemaRequestCache = new Map<string, Promise<SchemaTable[]>>();
-
-class AirtableRequestError extends Error {
-  status: number;
-
-  constructor(message: string, status: number) {
-    super(message);
-    this.name = "AirtableRequestError";
-    this.status = status;
-  }
-}
-
 type StoreRow = {
   store: string;
   orders: number;
@@ -103,54 +86,27 @@ function resolveToken(base: SessionBase) {
 }
 
 async function getSchema(baseId: string, token: string) {
-  const now = Date.now();
-  const cached = schemaCache.get(baseId);
-
-  if (cached && cached.expiresAt > now) {
-    return cached.tables;
-  }
-
-  const inFlight = schemaRequestCache.get(baseId);
-  if (inFlight) {
-    return inFlight;
-  }
-
-  const request = (async () => {
-    const response = await fetch(
-      `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(baseId)}/tables`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-        cache: "no-store",
-      }
-    );
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(
-        data?.error?.message ||
-          data?.error?.error?.message ||
-          `Schema load failed for ${baseId}`
-      );
+  const response = await fetch(
+    `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(baseId)}/tables`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      cache: "no-store",
     }
+  );
 
-    const tables = (data.tables || []) as SchemaTable[];
-    schemaCache.set(baseId, {
-      tables,
-      expiresAt: Date.now() + SCHEMA_CACHE_TTL_MS,
-    });
-    return tables;
-  })();
+  const data = await response.json();
 
-  schemaRequestCache.set(baseId, request);
-
-  try {
-    return await request;
-  } finally {
-    schemaRequestCache.delete(baseId);
+  if (!response.ok) {
+    throw new Error(
+      data?.error?.message ||
+        data?.error?.error?.message ||
+        `Schema load failed for ${baseId}`
+    );
   }
+
+  return (data.tables || []) as SchemaTable[];
 }
 
 function findInvoiceTable(
@@ -206,13 +162,11 @@ async function fetchAllRecords({
   token,
   tableName,
   fields,
-  filterByFormula,
 }: {
   baseId: string;
   token: string;
   tableName: string;
   fields: string[];
-  filterByFormula?: string;
 }) {
   const records: any[] = [];
   let offset = "";
@@ -223,10 +177,6 @@ async function fetchAllRecords({
 
     for (const field of fields) {
       if (field) params.append("fields[]", field);
-    }
-
-    if (filterByFormula) {
-      params.set("filterByFormula", filterByFormula);
     }
 
     if (offset) params.set("offset", offset);
@@ -246,11 +196,10 @@ async function fetchAllRecords({
     const data = await response.json();
 
     if (!response.ok) {
-      throw new AirtableRequestError(
+      throw new Error(
         data?.error?.message ||
           data?.error?.error?.message ||
-          `Report fetch failed for ${tableName}`,
-        response.status
+          `Report fetch failed for ${tableName}`
       );
     }
 
@@ -259,68 +208,6 @@ async function fetchAllRecords({
   } while (offset);
 
   return records;
-}
-
-function canUseDirectDateFilter(field: SchemaField | undefined) {
-  const type = normalize(field?.type);
-  return (
-    type === "date" ||
-    type === "datetime" ||
-    type === "createdtime" ||
-    type === "lastmodifiedtime"
-  );
-}
-
-function monthFilterFormula(fieldName: string, monthStart: string, monthEnd: string) {
-  return (
-    `AND(` +
-    `NOT(IS_BEFORE({${fieldName}},DATETIME_PARSE('${monthStart}'))),` +
-    `IS_BEFORE({${fieldName}},DATETIME_PARSE('${monthEnd}'))` +
-    `)`
-  );
-}
-
-async function fetchReportRecords({
-  baseId,
-  token,
-  tableName,
-  fields,
-  dateField,
-  dateSchemaField,
-  monthStart,
-  monthEnd,
-}: {
-  baseId: string;
-  token: string;
-  tableName: string;
-  fields: string[];
-  dateField: string;
-  dateSchemaField: SchemaField | undefined;
-  monthStart: string;
-  monthEnd: string;
-}) {
-  if (!canUseDirectDateFilter(dateSchemaField)) {
-    return fetchAllRecords({ baseId, token, tableName, fields });
-  }
-
-  try {
-    return await fetchAllRecords({
-      baseId,
-      token,
-      tableName,
-      fields,
-      filterByFormula: monthFilterFormula(dateField, monthStart, monthEnd),
-    });
-  } catch (error) {
-    if (
-      error instanceof AirtableRequestError &&
-      (error.status === 400 || error.status === 422)
-    ) {
-      return fetchAllRecords({ baseId, token, tableName, fields });
-    }
-
-    throw error;
-  }
 }
 
 function isDateInMonth(
@@ -499,8 +386,17 @@ export async function GET(request: Request) {
           "Grand Total",
           "Order Total",
           "Bill Value",
-          "COD Amount",
           "Total",
+        ]);
+
+        // Added COD Amount field specifically for Delivered logic
+        const codAmountField = getFieldName(schemaFields, [
+          "cod_amount",
+          "COD Amount",
+          "COD Amount1",
+          "COD Amount (AED)",
+          "CODAmt",
+          "COD Value"
         ]);
 
         if (!dateField) {
@@ -509,25 +405,17 @@ export async function GET(request: Request) {
           );
         }
 
-        const dateSchemaField = schemaFields.find(
-          (field) => field.name === dateField
-        );
-        const requestedFields = [
-          dateField,
-          statusField,
-          storeField,
-          valueField,
-        ].filter(Boolean);
-
-        const records = await fetchReportRecords({
+        const records = await fetchAllRecords({
           baseId: base.baseId,
           token,
           tableName: invoiceTable.name,
-          fields: requestedFields,
-          dateField,
-          dateSchemaField,
-          monthStart: start,
-          monthEnd: end,
+          fields: [
+            dateField,
+            statusField,
+            storeField,
+            valueField,
+            codAmountField,
+          ].filter(Boolean),
         });
 
         for (const record of records) {
@@ -568,6 +456,10 @@ export async function GET(request: Request) {
           const value = valueField
             ? numberValue(fields[valueField])
             : 0;
+            
+          const codValue = codAmountField
+            ? numberValue(fields[codAmountField])
+            : value; // Fallback to normal value if COD field is missing in schema
 
           if (!baseRows.has(storeName)) {
             baseRows.set(storeName, emptyStoreRow(storeName));
@@ -580,7 +472,8 @@ export async function GET(request: Request) {
 
           if (status.includes("deliver")) {
             row.delivered += 1;
-            row.deliveredValue += value;
+            // Picking COD Amount strictly for delivered orders
+            row.deliveredValue += codValue; 
           } else if (status.includes("dispatch")) {
             row.dispatched += 1;
             row.dispatchedValue += value;
