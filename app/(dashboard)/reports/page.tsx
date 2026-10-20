@@ -56,11 +56,15 @@ const EMPTY_SUMMARY: ReportSummary = {
   cancelledValue: 0,
 };
 
-function currentMonth() {
+function defaultStartDate() {
   const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+}
 
-  return `${now.getFullYear()}-${String(
-    now.getMonth() + 1
+function defaultEndDate() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(
+    now.getDate()
   ).padStart(2, "0")}`;
 }
 
@@ -80,7 +84,7 @@ function safeSheetName(value: string) {
   );
 }
 
-function exportSingleReport(report: BaseReport, month: string) {
+function exportSingleReport(report: BaseReport, dateRangeStr: string) {
   const rows = [
     ...report.stores.map((row) => ({
       Store: row.store,
@@ -149,12 +153,13 @@ function exportSingleReport(report: BaseReport, month: string) {
 
   XLSX.writeFile(
     workbook,
-    `${fileBaseName}-store-summary-${month}.xlsx`
+    `${fileBaseName}-store-summary-${dateRangeStr}.xlsx`
   );
 }
 
 export default function ReportsPage() {
-  const [month, setMonth] = useState(currentMonth());
+  const [startDate, setStartDate] = useState(defaultStartDate());
+  const [endDate, setEndDate] = useState(defaultEndDate());
   const [store, setStore] = useState("");
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
@@ -165,12 +170,15 @@ export default function ReportsPage() {
     Array<{ baseName: string; message: string }>
   >([]);
 
+  const dateRangeStr = `${startDate}-to-${endDate}`;
+
   async function loadReport() {
     setLoading(true);
 
     try {
       const params = new URLSearchParams();
-      params.set("month", month);
+      params.set("startDate", startDate);
+      params.set("endDate", endDate);
 
       if (store.trim()) {
         params.set("store", store.trim());
@@ -341,7 +349,7 @@ export default function ReportsPage() {
 
     XLSX.writeFile(
       workbook,
-      `store-wise-summary-${month}.xlsx`
+      `store-wise-summary-${dateRangeStr}.xlsx`
     );
   }
 
@@ -362,17 +370,32 @@ export default function ReportsPage() {
           Store Wise Orders Report
         </h2>
 
-        <div className="grid gap-4 md:grid-cols-4">
+        <div className="grid gap-4 md:grid-cols-5">
           <div>
             <label className="text-xs font-bold text-slate-500">
-              Month
+              Start Date
             </label>
 
             <input
-              type="month"
-              value={month}
+              type="date"
+              value={startDate}
               onChange={(event) =>
-                setMonth(event.target.value)
+                setStartDate(event.target.value)
+              }
+              className="mt-1 h-11 w-full rounded-xl border px-3 font-bold"
+            />
+          </div>
+
+          <div>
+            <label className="text-xs font-bold text-slate-500">
+              End Date
+            </label>
+
+            <input
+              type="date"
+              value={endDate}
+              onChange={(event) =>
+                setEndDate(event.target.value)
               }
               className="mt-1 h-11 w-full rounded-xl border px-3 font-bold"
             />
@@ -448,7 +471,7 @@ export default function ReportsPage() {
           <BaseReportBlock
             key={report.baseId}
             report={report}
-            month={month}
+            dateRangeStr={dateRangeStr}
           />
         ))}
 
@@ -477,10 +500,10 @@ export default function ReportsPage() {
 
 function BaseReportBlock({
   report,
-  month,
+  dateRangeStr,
 }: {
   report: BaseReport;
-  month: string;
+  dateRangeStr: string;
 }) {
   return (
     <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -507,7 +530,7 @@ function BaseReportBlock({
 
           <button
             type="button"
-            onClick={() => exportSingleReport(report, month)}
+            onClick={() => exportSingleReport(report, dateRangeStr)}
             disabled={report.stores.length === 0}
             className="h-10 rounded-xl border border-blue-300 bg-blue-50 px-4 text-sm font-black text-blue-700 hover:bg-blue-100 disabled:opacity-50"
           >

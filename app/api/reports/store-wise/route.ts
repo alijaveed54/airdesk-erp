@@ -146,15 +146,25 @@ function findInvoiceTable(
   );
 }
 
-function getMonthRange(month: string) {
-  const [year, monthNumber] = month.split("-").map(Number);
-  const start = new Date(Date.UTC(year, monthNumber - 1, 1));
-  const end = new Date(Date.UTC(year, monthNumber, 1));
+function isDateInRange(
+  rawValue: any,
+  startDateStr: string,
+  endDateStr: string
+) {
+  const value = firstValue(rawValue);
+  if (!value) return false;
 
-  return {
-    start: start.toISOString(),
-    end: end.toISOString(),
-  };
+  const time = new Date(value).getTime();
+
+  if (!Number.isFinite(time)) return false;
+
+  const [sYear, sMonth, sDay] = startDateStr.split("-").map(Number);
+  const [eYear, eMonth, eDay] = endDateStr.split("-").map(Number);
+
+  const start = new Date(Date.UTC(sYear, sMonth - 1, sDay, 0, 0, 0, 0)).getTime();
+  const end = new Date(Date.UTC(eYear, eMonth - 1, eDay, 23, 59, 59, 999)).getTime();
+
+  return time >= start && time <= end;
 }
 
 async function fetchAllRecords({
@@ -210,21 +220,6 @@ async function fetchAllRecords({
   return records;
 }
 
-function isDateInMonth(
-  rawValue: any,
-  monthStart: string,
-  monthEnd: string
-) {
-  const value = firstValue(rawValue);
-  if (!value) return false;
-
-  const time = new Date(value).getTime();
-  const start = new Date(monthStart).getTime();
-  const end = new Date(monthEnd).getTime();
-
-  return Number.isFinite(time) && time >= start && time < end;
-}
-
 function emptyStoreRow(store: string): StoreRow {
   return {
     store,
@@ -255,13 +250,14 @@ export async function GET(request: Request) {
     }
 
     const { searchParams } = new URL(request.url);
-    const month = String(searchParams.get("month") || "").trim();
+    const startDate = String(searchParams.get("startDate") || "").trim();
+    const endDate = String(searchParams.get("endDate") || "").trim();
     const storeFilter = normalize(searchParams.get("store"));
     const statusFilter = normalize(searchParams.get("status"));
 
-    if (!month) {
+    if (!startDate || !endDate) {
       return NextResponse.json(
-        { success: false, message: "Month is required" },
+        { success: false, message: "Start date and End date are required" },
         { status: 400 }
       );
     }
@@ -312,8 +308,6 @@ export async function GET(request: Request) {
         { status: 403 }
       );
     }
-
-    const { start, end } = getMonthRange(month);
 
     const reports: Array<{
       baseName: string;
@@ -379,7 +373,6 @@ export async function GET(request: Request) {
           "store",
         ]);
 
-        // RESTORED: Main value field exactly as it was in original source
         const valueField = getFieldName(schemaFields, [
           "total_order_value",
           "Total Order Value",
@@ -391,7 +384,6 @@ export async function GET(request: Request) {
           "Total",
         ]);
 
-        // NEW: Specific field for Delivered COD value 
         const codAmountField = getFieldName(schemaFields, [
           "cod_amount",
           "COD Amount",
@@ -423,7 +415,7 @@ export async function GET(request: Request) {
         for (const record of records) {
           const fields = record.fields || {};
 
-          if (!isDateInMonth(fields[dateField], start, end)) {
+          if (!isDateInRange(fields[dateField], startDate, endDate)) {
             continue;
           }
 
@@ -470,11 +462,11 @@ export async function GET(request: Request) {
           const row = baseRows.get(storeName)!;
 
           row.orders += 1;
-          row.value += value; // Original functionality preserved for overall total
+          row.value += value; 
 
           if (status.includes("deliver")) {
             row.delivered += 1;
-            row.deliveredValue += codValue; // Only Delivered orders use the exact COD amount
+            row.deliveredValue += codValue; 
           } else if (status.includes("dispatch")) {
             row.dispatched += 1;
             row.dispatchedValue += value;
@@ -582,7 +574,7 @@ export async function GET(request: Request) {
 
     return NextResponse.json({
       success: true,
-      month,
+      dateRange: { startDate, endDate },
       mode: showAllBases ? "all-bases" : "selected-base",
       reports,
       summary: grandTotal,
