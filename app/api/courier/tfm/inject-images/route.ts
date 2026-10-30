@@ -53,9 +53,7 @@ async function resolveProductImagesForOrder(
   if (!refNo) return [];
   const collectedUrls = new Set<string>();
 
-  // Aap apne Airtable tables ke sahi naam yahan rakh sakte hain
   const tables = ["BS Order Entry", "FAB Order Entry", "DQ Order Entry", "Orders", "Order Entry"];
-  // Possible field names where Ref# or Order Number might be stored in Airtable
   const fieldNames = ["Order Number", "Ref#", "Ref", "Order No", "Order #", "Reference"];
 
   for (const tableName of tables) {
@@ -75,17 +73,11 @@ async function resolveProductImagesForOrder(
         });
 
         if (!res.ok) {
-          const errText = await res.text();
-          // Status 403 or 422 log kar ke next field/table par move honge
-          if (res.status !== 422) {
-            console.warn(`[TFM Debug] Table "${tableName}" status ${res.status}: ${errText}`);
-          }
           continue;
         }
 
         const data = await res.json();
         if (data.records && data.records.length > 0) {
-          console.log(`[TFM Found!] Match in Table: "${tableName}" using field: "${fieldName}" for Ref#: ${refNo}`);
           for (const record of data.records) {
             const fields = record.fields || {};
             const matchedKey = Object.keys(fields).find((k) =>
@@ -106,7 +98,6 @@ async function resolveProductImagesForOrder(
     }
   }
 
-  console.warn(`[TFM Warning] No product images resolved for Ref# ${refNo} across tested tables/fields.`);
   return Array.from(collectedUrls);
 }
 
@@ -240,7 +231,7 @@ export async function POST(req: NextRequest) {
 
     const pdfBytes = await pdfDoc.save();
 
-    return new NextResponse(pdfBytes, {
+    return new NextResponse(pdfBytes as unknown as BodyInit, {
       status: 200,
       headers: {
         "Content-Type": "application/pdf",
