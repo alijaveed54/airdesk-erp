@@ -270,9 +270,15 @@ export default function Sidebar() {
     },
     {
       show: session?.role !== "Supplier" && (isAdmin || isManager || isEmployee || Boolean(permission?.canReports)),
-      href: "/courier/tfm",
+      href: "/courier/tfm/inject-images",
       label: "TFM Image Injector",
       icon: PackageCheck,
+    },
+    {
+      show: session?.role !== "Supplier" && (isAdmin || isManager || isEmployee || Boolean(permission?.canReports)),
+      href: "/courier/tfm",
+      label: "TFM Shipments",
+      icon: Truck,
     },
     {
       show: isAdmin || Boolean(permission?.canReports),
@@ -513,6 +519,7 @@ export default function Sidebar() {
         item.href.includes("/reports/courier"),
     ),
     [
+      "/courier/tfm/inject",
       "/courier/tfm",
       "/reports/courier-pending-update",
       "/reports/courier",
