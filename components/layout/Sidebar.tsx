@@ -31,8 +31,6 @@ import {
   FileSpreadsheet,
 } from "lucide-react";
 
-// Static review only — not runtime-tested.
-
 type Session = {
   role: string;
   superAdmin?: boolean;
@@ -271,20 +269,9 @@ export default function Sidebar() {
       icon: PackageCheck,
     },
     {
-      show:
-        session?.role !== "Supplier" &&
-        (isAdmin ||
-          Boolean(
-            session?.permissions?.some(
-              (item: any) =>
-                Boolean(item?.canReports) &&
-                ["app2hjpuQoeEL1Rn2", "app4YLp41AMlWtCxK"].includes(
-                  String(item?.baseId || ""),
-                ),
-            ),
-          )),
+      show: session?.role !== "Supplier" && (isAdmin || isManager || isEmployee || Boolean(permission?.canReports)),
       href: "/courier/tfm",
-      label: "TFM Shipments",
+      label: "TFM Image Injector",
       icon: PackageCheck,
     },
     {
