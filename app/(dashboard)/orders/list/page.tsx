@@ -388,6 +388,7 @@ export default function OrdersListPage() {
   const [movingOrderId, setMovingOrderId] = useState("");
   const [movedOrderIds, setMovedOrderIds] = useState<string[]>([]);
   const [deletingOrderId, setDeletingOrderId] = useState("");
+  const [whatsappSendingOrderId, setWhatsappSendingOrderId] = useState("");
   const [capabilities, setCapabilities] = useState({
     hasStore: true,
     hasStatus: true,
@@ -569,6 +570,47 @@ export default function OrdersListPage() {
       alert("Inline update failed");
     } finally {
       setSavingKey("");
+    }
+  }
+
+  async function handleWhatsAppShare(order: OrderRecord) {
+    const tableName = String(
+      (order.fields as Record<string, unknown>).__tableName || ""
+    ).trim();
+    const orderNo = getOrderNo(order);
+
+    if (!tableName) {
+      alert("Source table not found for this order.");
+      return;
+    }
+
+    if (!confirm(`Send items and photos of order ${orderNo} to WhatsApp?`)) {
+      return;
+    }
+
+    setWhatsappSendingOrderId(order.id);
+
+    try {
+      const response = await fetch("/api/orders/share-whatsapp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orderId: order.id,
+          tableName,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.message || "WhatsApp send failed");
+      }
+
+      alert(`WhatsApp sent successfully: ${data.sent || 0} item(s) for order ${orderNo}.`);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "WhatsApp send failed");
+    } finally {
+      setWhatsappSendingOrderId("");
     }
   }
 
@@ -1683,7 +1725,7 @@ export default function OrdersListPage() {
                       <th className="w-[190px] px-4 py-4 text-left">
                         Courier
                       </th>
-                      <th className="w-[240px] px-4 py-4 text-right">
+                      <th className="w-[280px] px-4 py-4 text-right">
                         Action
                       </th>
                     </tr>
@@ -1878,7 +1920,7 @@ export default function OrdersListPage() {
                           </td>
 
                           <td className="px-4 py-3 text-right">
-                            <div className="flex flex-nowrap justify-end gap-2">
+                            <div className="flex flex-nowrap justify-end gap-1.5">
                               {editingOrderId === order.id ? (
                                 <>
                                   <button
@@ -1905,6 +1947,17 @@ export default function OrdersListPage() {
                                 </>
                               ) : (
                                 <>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleWhatsAppShare(order)}
+                                    disabled={whatsappSendingOrderId === order.id || Boolean(savingKey)}
+                                    title="Send order items & photos to WhatsApp"
+                                    aria-label="Send order items & photos to WhatsApp"
+                                    className="flex h-10 w-10 items-center justify-center rounded-xl border border-emerald-700 bg-emerald-600 text-base font-black text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                  >
+                                    {whatsappSendingOrderId === order.id ? "⏳" : "💬"}
+                                  </button>
+
                                   <button
                                     type="button"
                                     onClick={() =>
