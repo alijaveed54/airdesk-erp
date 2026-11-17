@@ -282,6 +282,12 @@ export default function Sidebar() {
     },
     {
       show: isAdmin || Boolean(permission?.canReports),
+      href: "/reports/skycome",
+      label: "Skycome Dispatch",
+      icon: Truck,
+    },
+    {
+      show: isAdmin || Boolean(permission?.canReports),
       href: "/reports/courier",
       label: "Courier Summary",
       icon: BarChart3,
@@ -516,11 +522,13 @@ export default function Sidebar() {
     nav.filter(
       (item) =>
         item.href.startsWith("/courier") ||
-        item.href.includes("/reports/courier"),
+        item.href.includes("/reports/courier") ||
+        item.href === "/reports/skycome",
     ),
     [
       "/courier/tfm/inject",
       "/courier/tfm",
+      "/reports/skycome",
       "/reports/courier-pending-update",
       "/reports/courier",
     ],
@@ -530,6 +538,7 @@ export default function Sidebar() {
     nav.filter(
       (item) =>
         item.href.startsWith("/reports") &&
+        item.href !== "/reports/skycome" &&
         !orderNav.some((entry) => entry.href === item.href) &&
         !supplierNav.some((entry) => entry.href === item.href) &&
         !courierNav.some((entry) => entry.href === item.href),
