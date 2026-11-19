@@ -41,6 +41,9 @@ type OrderItem = {
   billNo: string;
   receivedWH: string;
   receivedUAE: string;
+  receivedInUaeDateTime: string;
+  skycomAwb: string;
+  skycomAwbStatus: string;
 };
 
 type OrderGroup = {
@@ -51,6 +54,13 @@ type OrderGroup = {
   date: string;
   items: OrderItem[];
 };
+
+type SkycomeAwbMeta = {
+  status: string;
+  receivedDateTime: string;
+};
+
+const SKYCOME_BASE_ID = "appIJzkEQLOw87bqf";
 
 const CUSTOMER_NAME_CANDIDATES = [
   "Name (from Contact No.)",
@@ -174,6 +184,23 @@ function normalizeDate(value: string) {
   ).padStart(2, "0")}${date.getFullYear()}`;
 }
 
+function formatReadableUaeDate(rawDateTime: string): string {
+  const clean = String(rawDateTime || "").trim();
+  if (!clean) return "";
+
+  const parsed = new Date(clean);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toLocaleString("en-GB", {
+      timeZone: "Asia/Dubai",
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    });
+  }
+
+  return clean;
+}
+
 function isDateBill(value: string) {
   return /^\d{8}$/.test(value);
 }
@@ -183,17 +210,120 @@ function isYes(value: any) {
   return v === "yes" || v === "true" || v === "1" || v === "checked";
 }
 
-function getReason(item: OrderItem) {
+function getReason(
+  item: OrderItem,
+  skycomeLookup?: Record<string, SkycomeAwbMeta>
+) {
   const billNo = item.billNo.trim();
+  const supplierName = item.supplier.trim();
   const wh = isYes(item.receivedWH);
   const uae = isYes(item.receivedUAE);
 
-  if (!billNo && !wh) return "Supplier has not dispatched yet";
+  const awbKey = item.skycomAwb.trim().toLowerCase();
+  const skycomeInfo = awbKey && skycomeLookup ? skycomeLookup[awbKey] : undefined;
+
+  const awbNoText = item.skycomAwb.trim();
+  const awbStatusText = (
+    item.skycomAwbStatus.trim() ||
+    skycomeInfo?.status ||
+    ""
+  ).trim();
+
+  const awbSuffix = [
+    awbNoText ? `AWB: ${awbNoText}` : "",
+    awbStatusText ? `(${awbStatusText})` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  if (!billNo && !wh) {
+    return supplierName
+      ? `${supplierName} has not dispatched yet`
+      : "Supplier has not dispatched yet";
+  }
   if (!billNo && wh) return "Item Instock";
   if (billNo.toLowerCase() === "stock out" && wh) return "Item Stock Out";
-  if (isDateBill(billNo) && wh && !uae) return `Supplier Dispatched on ${billNo} — UAE not yet received`;
-  if (isDateBill(billNo) && wh && uae) return `Item received in UAE`;
+
+  if (isDateBill(billNo) && wh && !uae) {
+    const dispatchLabel = supplierName
+      ? `${supplierName} Dispatched on ${billNo}`
+      : `Dispatched on ${billNo}`;
+    return awbSuffix ? `${dispatchLabel} - ${awbSuffix}` : dispatchLabel;
+  }
+
+  if (wh && uae) {
+    const rawDate =
+      item.receivedInUaeDateTime.trim() ||
+      skycomeInfo?.receivedDateTime ||
+      "";
+    const formattedDate = formatReadableUaeDate(rawDate);
+    if (formattedDate) {
+      return awbNoText
+        ? `Received in UAE on ${formattedDate} (AWB: ${awbNoText})`
+        : `Received in UAE on ${formattedDate}`;
+    }
+    return awbNoText
+      ? `Received in UAE (AWB: ${awbNoText})`
+      : "Item received in UAE";
+  }
+
   return "Processing pending";
+}
+
+async function fetchSkycomeAwbLookup(
+  token: string,
+  awbNumbers: string[]
+): Promise<Record<string, SkycomeAwbMeta>> {
+  const resultMap: Record<string, SkycomeAwbMeta> = {};
+  const uniqueAwbs = Array.from(
+    new Set(awbNumbers.map((a) => a.trim()).filter(Boolean))
+  );
+
+  if (uniqueAwbs.length === 0) return resultMap;
+
+  for (let i = 0; i < uniqueAwbs.length; i += 25) {
+    const batch = uniqueAwbs.slice(i, i + 25);
+    const formulas = batch.map(
+      (awb) => `TRIM({AWB Number}&'')='${escapeAirtableString(awb)}'`
+    );
+    const params = new URLSearchParams({
+      pageSize: "100",
+      filterByFormula:
+        formulas.length === 1 ? formulas[0] : `OR(${formulas.join(",")})`,
+    });
+
+    try {
+      const response = await fetch(
+        airtableUrl(SKYCOME_BASE_ID, "Skycome AWBs", params),
+        {
+          headers: airtableHeaders(token),
+          cache: "no-store",
+        }
+      );
+      if (!response.ok) continue;
+
+      const data = await response.json();
+      for (const rec of data.records || []) {
+        const f = rec.fields || {};
+        const awbVal = text(f["AWB Number"]).trim().toLowerCase();
+        if (!awbVal) continue;
+
+        const statusVal = text(f["AWB Status"]).trim();
+        const dtVal = text(
+          f["Received In UAE DateTime"] || f["Received Date"] || ""
+        ).trim();
+
+        resultMap[awbVal] = {
+          status: statusVal,
+          receivedDateTime: dtVal,
+        };
+      }
+    } catch {
+      // Ignore secondary lookup failures gracefully
+    }
+  }
+
+  return resultMap;
 }
 
 function formatItemSkuText(itemCode: string, itemDetail: string): string {
@@ -761,6 +891,9 @@ function groupOrders(
       billNo: text(f[fields.billNo]),
       receivedWH: text(f[fields.receivedWH]),
       receivedUAE: text(f[fields.receivedUAE]),
+      receivedInUaeDateTime: text(f[fields.receivedInUaeDateTime]),
+      skycomAwb: text(f[fields.skycomAwb]),
+      skycomAwbStatus: text(f[fields.skycomAwbStatus]),
     };
 
     if (!orders.has(orderNo)) {
@@ -787,10 +920,13 @@ function groupOrders(
   return Array.from(orders.values());
 }
 
-function createReportRows(orders: OrderGroup[]) {
+function createReportRows(
+  orders: OrderGroup[],
+  skycomeLookup?: Record<string, SkycomeAwbMeta>
+) {
   return orders.map((order) => {
     const itemLines = order.items.map((item) => {
-      const reason = getReason(item);
+      const reason = getReason(item, skycomeLookup);
       const skuText = formatItemSkuText(item.itemCode, item.itemDetail);
 
       return `${skuText}
@@ -812,7 +948,10 @@ ${itemLines.join("\n\n")}`;
 ${order.items
   .map(
     (item) =>
-      `${formatItemSkuText(item.itemCode, item.itemDetail)} -${getReason(item)}`
+      `${formatItemSkuText(item.itemCode, item.itemDetail)} -${getReason(
+        item,
+        skycomeLookup
+      )}`
   )
   .join("\n")}`;
 
@@ -823,7 +962,9 @@ ${order.items
       mobile: order.mobile,
       date: order.date,
       items: order.items.length,
-      reason: order.items.map((item) => getReason(item)).join("\n"),
+      reason: order.items
+        .map((item) => getReason(item, skycomeLookup))
+        .join("\n"),
       copyText,
       line,
     };
@@ -847,13 +988,12 @@ function getOrderFields(table: SchemaTable) {
     ]),
     quantity: findField(fields, ["quantity", "Quantity", "Qty"]),
     supplier: findField(fields, ["Supplier"]),
-    billNo: findField(fields, ["bill_no", "Bill No", "Bill No."]),
-    receivedWH: findField(fields, [
-      "received_in_wh_1",
-      "Received In WH 1",
-      "Received in WH 1",
-    ]),
-    receivedUAE: findField(fields, ["Received In UAE", "Received in UAE"]),
+    billNo: findField(fields, ["bill_no"]),
+    receivedWH: findField(fields, ["received_in_wh_1"]),
+    receivedUAE: findField(fields, ["Received In UAE"]),
+    receivedInUaeDateTime: findField(fields, ["Received In UAE DateTime"]),
+    skycomAwb: findField(fields, ["Skycom AWB"]),
+    skycomAwbStatus: findField(fields, ["Skycom AWB Status"]),
     orderStatus: findField(fields, [
       "Order_status",
       "order_status",
@@ -929,6 +1069,9 @@ export async function GET(request: NextRequest) {
       fieldMap.billNo,
       fieldMap.receivedWH,
       fieldMap.receivedUAE,
+      fieldMap.receivedInUaeDateTime,
+      fieldMap.skycomAwb,
+      fieldMap.skycomAwbStatus,
       fieldMap.orderStatus,
       invoiceLinkField?.name || "",
       ...customerLinkFields,
@@ -953,7 +1096,12 @@ export async function GET(request: NextRequest) {
 
     const orders = groupOrders(records, fieldMap, customerDetailsMap);
 
-    const rows = createReportRows(orders).sort((a, b) => {
+    const allAwbs = orders.flatMap((o) =>
+      o.items.map((item) => item.skycomAwb).filter(Boolean)
+    );
+    const skycomeLookup = await fetchSkycomeAwbLookup(airtable.token, allAwbs);
+
+    const rows = createReportRows(orders, skycomeLookup).sort((a, b) => {
       function convertDate(date: string) {
         const day = Number(date.substring(0, 2));
         const month = Number(date.substring(2, 4));

@@ -19,24 +19,43 @@ type GroupedAwbRow = {
   items: ItemDetail[];
 };
 
-const STATUS_OPTIONS = [
-  'Dispatched',
-  'In Transit',
-  'Custom Clearance',
-  'Out for Delivery',
-  'Delivered in UAE',
-  'Delayed',
-];
+function groupFlatRecords(records: any[]): GroupedAwbRow[] {
+  const map: Record<string, GroupedAwbRow> = {};
+
+  for (const rec of records || []) {
+    if (!map[rec.awbNumber]) {
+      map[rec.awbNumber] = {
+        id: rec.id,
+        awbRecordId: rec.awbRecordId || rec.id.split('-')[0],
+        dispatchDate: rec.dispatchDate,
+        awbNumber: rec.awbNumber,
+        awbImageUrl: rec.awbImageUrl,
+        receivedInUae: rec.receivedInUae,
+        awbStatus: rec.awbStatus,
+        items: [],
+      };
+    }
+    if (rec.supplierName && rec.supplierName !== '-') {
+      map[rec.awbNumber].items.push({
+        supplierName: rec.supplierName,
+        supplierBillNo: rec.supplierBillNo,
+        totalQuantity: rec.totalQuantity,
+      });
+    }
+  }
+
+  return Object.values(map);
+}
 
 export default function SkycomeDispatchReportPage() {
   const [groupedRows, setGroupedRows] = useState<GroupedAwbRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [syncingUnreceived, setSyncingUnreceived] = useState(false);
   const [search, setSearch] = useState('');
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [expandedAwb, setExpandedAwb] = useState<string | null>(null);
 
-  // Edit Modal states
   const [editingRow, setEditingRow] = useState<GroupedAwbRow | null>(null);
   const [editReceivedInUae, setEditReceivedInUae] = useState<'Yes' | 'No'>('No');
   const [editAwbStatus, setEditAwbStatus] = useState<string>('Dispatched');
@@ -46,34 +65,12 @@ export default function SkycomeDispatchReportPage() {
     setLoading(true);
     setError('');
     try {
-      const res = await fetch('/api/reports/skycome-report');
+      const res = await fetch('/api/reports/skycome-report', {
+        cache: 'no-store',
+      });
       const data = await res.json();
       if (data.success) {
-        const map: Record<string, GroupedAwbRow> = {};
-
-        for (const rec of data.records || []) {
-          if (!map[rec.awbNumber]) {
-            map[rec.awbNumber] = {
-              id: rec.id,
-              awbRecordId: rec.awbRecordId || rec.id.split('-')[0],
-              dispatchDate: rec.dispatchDate,
-              awbNumber: rec.awbNumber,
-              awbImageUrl: rec.awbImageUrl,
-              receivedInUae: rec.receivedInUae,
-              awbStatus: rec.awbStatus,
-              items: [],
-            };
-          }
-          if (rec.supplierName && rec.supplierName !== '-') {
-            map[rec.awbNumber].items.push({
-              supplierName: rec.supplierName,
-              supplierBillNo: rec.supplierBillNo,
-              totalQuantity: rec.totalQuantity,
-            });
-          }
-        }
-
-        setGroupedRows(Object.values(map));
+        setGroupedRows(groupFlatRecords(data.records || []));
       } else {
         setError(data.error || 'Failed to load report');
       }
@@ -88,11 +85,38 @@ export default function SkycomeDispatchReportPage() {
     loadReport();
   }, []);
 
+  async function handleSyncUnreceivedStatus() {
+    setSyncingUnreceived(true);
+    setError('');
+    setSuccessMsg('');
+    try {
+      const res = await fetch('/api/reports/skycome-report', {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (data.success) {
+        if (Array.isArray(data.records)) {
+          setGroupedRows(groupFlatRecords(data.records));
+        } else {
+          await loadReport();
+        }
+        setSuccessMsg(
+          data.message || 'Unreceived AWB statuses synced from Skycome!'
+        );
+      } else {
+        setError(data.error || 'Failed to sync unreceived AWB statuses');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to sync unreceived AWB statuses');
+    } finally {
+      setSyncingUnreceived(false);
+    }
+  }
+
   const toggleExpand = (awbNumber: string) => {
     setExpandedAwb(expandedAwb === awbNumber ? null : awbNumber);
   };
 
-  // Open Edit Modal
   const openEditModal = (row: GroupedAwbRow, e: React.MouseEvent) => {
     e.stopPropagation();
     const currentRec = row.receivedInUae === 'Yes' ? 'Yes' : 'No';
@@ -103,7 +127,6 @@ export default function SkycomeDispatchReportPage() {
     );
   };
 
-  // Jab Received in UAE ko "Yes" karein toh status automatically "Delivered in UAE" ho jaye
   const handleReceivedChange = (val: 'Yes' | 'No') => {
     setEditReceivedInUae(val);
     if (val === 'Yes') {
@@ -121,7 +144,9 @@ export default function SkycomeDispatchReportPage() {
 
     try {
       const finalStatus =
-        editReceivedInUae === 'Yes' ? 'Delivered in UAE' : editAwbStatus;
+        editReceivedInUae === 'Yes'
+          ? 'Delivered in UAE'
+          : editAwbStatus.trim() || 'Dispatched';
 
       const res = await fetch('/api/reports/skycome-report', {
         method: 'PATCH',
@@ -176,19 +201,32 @@ export default function SkycomeDispatchReportPage() {
     <div className="p-6 max-w-7xl mx-auto space-y-6">
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
-          <h1 className="text-2xl font-black text-slate-900">Skycome Dispatch Report</h1>
+          <h1 className="text-2xl font-black text-slate-900">
+            Skycome Dispatch Report
+          </h1>
           <p className="text-sm text-slate-500">
             Date-wise sorted (Newest on top) - Click AWB to expand items or Edit to update status
           </p>
         </div>
 
-        <input
-          type="text"
-          placeholder="Search AWB, Supplier, Bill No..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="border border-slate-300 rounded-xl px-4 py-2 text-sm w-full md:w-80 focus:ring-2 focus:ring-blue-500 outline-none bg-white shadow-sm"
-        />
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full md:w-auto">
+          <button
+            type="button"
+            onClick={handleSyncUnreceivedStatus}
+            disabled={syncingUnreceived || loading}
+            className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 disabled:opacity-50 transition shadow-sm whitespace-nowrap"
+          >
+            {syncingUnreceived ? 'Syncing Status...' : 'Sync Unreceived Status'}
+          </button>
+
+          <input
+            type="text"
+            placeholder="Search AWB, Supplier, Bill No..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="border border-slate-300 rounded-xl px-4 py-2 text-sm w-full sm:w-72 focus:ring-2 focus:ring-blue-500 outline-none bg-white shadow-sm"
+          />
+        </div>
       </div>
 
       {error && (
@@ -221,13 +259,19 @@ export default function SkycomeDispatchReportPage() {
             <tbody className="divide-y divide-slate-100 text-sm text-slate-700">
               {loading ? (
                 <tr>
-                  <td colSpan={8} className="p-8 text-center text-slate-400 font-medium">
+                  <td
+                    colSpan={8}
+                    className="p-8 text-center text-slate-400 font-medium"
+                  >
                     Loading report data...
                   </td>
                 </tr>
               ) : filteredRows.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="p-8 text-center text-slate-400 font-medium">
+                  <td
+                    colSpan={8}
+                    className="p-8 text-center text-slate-400 font-medium"
+                  >
                     No records found.
                   </td>
                 </tr>
@@ -245,7 +289,9 @@ export default function SkycomeDispatchReportPage() {
                         onClick={() => toggleExpand(row.awbNumber)}
                         className="hover:bg-slate-50/80 transition-colors cursor-pointer select-none"
                       >
-                        <td className="p-4 font-medium text-slate-900">{row.dispatchDate}</td>
+                        <td className="p-4 font-medium text-slate-900">
+                          {row.dispatchDate}
+                        </td>
                         <td className="p-4 font-bold text-blue-600 flex items-center gap-2">
                           <span>{row.awbNumber}</span>
                           <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-semibold">
@@ -254,7 +300,11 @@ export default function SkycomeDispatchReportPage() {
                         </td>
                         <td className="p-4" onClick={(e) => e.stopPropagation()}>
                           {row.awbImageUrl ? (
-                            <a href={row.awbImageUrl} target="_blank" rel="noopener noreferrer">
+                            <a
+                              href={row.awbImageUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
                               <img
                                 src={row.awbImageUrl}
                                 alt="AWB Slip"
@@ -262,7 +312,9 @@ export default function SkycomeDispatchReportPage() {
                               />
                             </a>
                           ) : (
-                            <span className="text-xs text-slate-400">No Image</span>
+                            <span className="text-xs text-slate-400">
+                              No Image
+                            </span>
                           )}
                         </td>
                         <td className="p-4 font-medium text-slate-800">
@@ -316,7 +368,6 @@ export default function SkycomeDispatchReportPage() {
                         </td>
                       </tr>
 
-                      {/* Expanded Details Row */}
                       {isExpanded && (
                         <tr className="bg-slate-50/60">
                           <td colSpan={8} className="p-4 px-8">
@@ -329,7 +380,9 @@ export default function SkycomeDispatchReportPage() {
                                   <tr className="border-b border-slate-100 text-slate-500 font-bold">
                                     <th className="pb-2">Supplier Name</th>
                                     <th className="pb-2">Supplier Bill No.</th>
-                                    <th className="pb-2 text-right">Total Quantity</th>
+                                    <th className="pb-2 text-right">
+                                      Total Quantity
+                                    </th>
                                   </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-50">
@@ -361,7 +414,6 @@ export default function SkycomeDispatchReportPage() {
         </div>
       </div>
 
-      {/* Edit Modal */}
       {editingRow && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
           <div className="bg-white rounded-3xl shadow-xl border border-slate-200 max-w-md w-full p-6 space-y-5">
@@ -371,7 +423,10 @@ export default function SkycomeDispatchReportPage() {
                   Edit AWB: {editingRow.awbNumber}
                 </h3>
                 <p className="text-xs text-slate-500">
-                  Suppliers: {editingRow.items.map((i) => `${i.supplierName} (${i.supplierBillNo})`).join(', ')}
+                  Suppliers:{' '}
+                  {editingRow.items
+                    .map((i) => `${i.supplierName} (${i.supplierBillNo})`)
+                    .join(', ')}
                 </p>
               </div>
               <button
@@ -390,7 +445,9 @@ export default function SkycomeDispatchReportPage() {
                 </label>
                 <select
                   value={editReceivedInUae}
-                  onChange={(e) => handleReceivedChange(e.target.value as 'Yes' | 'No')}
+                  onChange={(e) =>
+                    handleReceivedChange(e.target.value as 'Yes' | 'No')
+                  }
                   className="w-full border border-slate-300 rounded-xl p-2.5 text-sm font-semibold bg-white focus:ring-2 focus:ring-blue-500 outline-none"
                 >
                   <option value="No">No</option>
@@ -398,7 +455,9 @@ export default function SkycomeDispatchReportPage() {
                 </select>
                 {editReceivedInUae === 'Yes' && (
                   <p className="text-xs text-emerald-600 font-medium mt-1">
-                    ✓ Status will automatically be set to &quot;Delivered in UAE&quot; and all linked supplier bill items will be marked Received in UAE.
+                    ✓ Status will automatically be set to &quot;Delivered in UAE&quot;
+                    and all linked supplier bill items will be marked Received in
+                    UAE.
                   </p>
                 )}
               </div>
@@ -407,18 +466,18 @@ export default function SkycomeDispatchReportPage() {
                 <label className="block text-xs font-bold text-slate-700 uppercase mb-1.5">
                   AWB Status (Syncs to Skycom AWB Status)
                 </label>
-                <select
-                  value={editReceivedInUae === 'Yes' ? 'Delivered in UAE' : editAwbStatus}
+                <input
+                  type="text"
+                  value={
+                    editReceivedInUae === 'Yes'
+                      ? 'Delivered in UAE'
+                      : editAwbStatus
+                  }
                   disabled={editReceivedInUae === 'Yes'}
                   onChange={(e) => setEditAwbStatus(e.target.value)}
+                  placeholder="Enter AWB status..."
                   className="w-full border border-slate-300 rounded-xl p-2.5 text-sm font-semibold bg-white focus:ring-2 focus:ring-blue-500 outline-none disabled:bg-slate-100 disabled:text-slate-500"
-                >
-                  {STATUS_OPTIONS.map((st) => (
-                    <option key={st} value={st}>
-                      {st}
-                    </option>
-                  ))}
-                </select>
+                />
               </div>
 
               <div className="flex justify-end gap-3 pt-3 border-t border-slate-100">

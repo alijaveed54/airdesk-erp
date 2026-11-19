@@ -23,7 +23,6 @@ import {
   Download,
   ListChecks,
   PackageCheck,
-  MessageCircle,
   Database,
   Clock,
   Pin,
@@ -46,14 +45,11 @@ export default function Sidebar() {
   const [facebookOpen, setFacebookOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  // Pin state: Agar true ho to hover par band nahi hoga, permanently open rahega
   const [isPinned, setIsPinned] = useState(false);
-  // Hovered state: Mouse andar hai ya bahar
   const [isHovered, setIsHovered] = useState(false);
 
   const leaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Sidebar tabhi collapsed hoga jab pin na ho aur mouse bhi upar na ho
   const isCollapsed = !isPinned && !isHovered;
 
   useEffect(() => {
@@ -63,7 +59,6 @@ export default function Sidebar() {
     }
   }, []);
 
-  // Jab bhi collapse state change ho, page layout ko notify karein
   useEffect(() => {
     requestAnimationFrame(() => {
       window.dispatchEvent(
@@ -72,7 +67,6 @@ export default function Sidebar() {
     });
   }, [isCollapsed]);
 
-  // Mouse andar aane par
   function handleMouseEnter() {
     if (leaveTimeoutRef.current) {
       clearTimeout(leaveTimeoutRef.current);
@@ -80,7 +74,6 @@ export default function Sidebar() {
     setIsHovered(true);
   }
 
-  // Mouse bahar jaane par (150ms delay smooth UX ke liye)
   function handleMouseLeave() {
     leaveTimeoutRef.current = setTimeout(() => {
       setIsHovered(false);
@@ -269,13 +262,17 @@ export default function Sidebar() {
       icon: PackageCheck,
     },
     {
-      show: session?.role !== "Supplier" && (isAdmin || isManager || isEmployee || Boolean(permission?.canReports)),
+      show:
+        session?.role !== "Supplier" &&
+        (isAdmin || isManager || isEmployee || Boolean(permission?.canReports)),
       href: "/courier/tfm/inject-images",
       label: "TFM Image Injector",
       icon: PackageCheck,
     },
     {
-      show: session?.role !== "Supplier" && (isAdmin || isManager || isEmployee || Boolean(permission?.canReports)),
+      show:
+        session?.role !== "Supplier" &&
+        (isAdmin || isManager || isEmployee || Boolean(permission?.canReports)),
       href: "/courier/tfm",
       label: "TFM Shipments",
       icon: Truck,
@@ -285,6 +282,12 @@ export default function Sidebar() {
       href: "/reports/skycome",
       label: "Skycome Dispatch",
       icon: Truck,
+    },
+    {
+      show: isAdmin || Boolean(permission?.canReports),
+      href: "/reports/skycome-report",
+      label: "Skycome Dispatch Report",
+      icon: ClipboardList,
     },
     {
       show: isAdmin || Boolean(permission?.canReports),
@@ -523,12 +526,14 @@ export default function Sidebar() {
       (item) =>
         item.href.startsWith("/courier") ||
         item.href.includes("/reports/courier") ||
-        item.href === "/reports/skycome",
+        item.href === "/reports/skycome" ||
+        item.href === "/reports/skycome-report",
     ),
     [
       "/courier/tfm/inject",
       "/courier/tfm",
       "/reports/skycome",
+      "/reports/skycome-report",
       "/reports/courier-pending-update",
       "/reports/courier",
     ],
@@ -539,6 +544,7 @@ export default function Sidebar() {
       (item) =>
         item.href.startsWith("/reports") &&
         item.href !== "/reports/skycome" &&
+        item.href !== "/reports/skycome-report" &&
         !orderNav.some((entry) => entry.href === item.href) &&
         !supplierNav.some((entry) => entry.href === item.href) &&
         !courierNav.some((entry) => entry.href === item.href),
@@ -628,7 +634,6 @@ export default function Sidebar() {
           mobileOpen ? "w-72 translate-x-0" : "-translate-x-full lg:translate-x-0",
         ].join(" ")}
       >
-        {/* Mobile Close Button */}
         <div className="mb-3 flex justify-end lg:hidden">
           <button
             type="button"
@@ -640,7 +645,6 @@ export default function Sidebar() {
           </button>
         </div>
 
-        {/* Top Header Card */}
         <div
           className={[
             "relative mb-4 rounded-3xl bg-gradient-to-br from-emerald-600 to-blue-600 text-white transition-all duration-300",
@@ -670,7 +674,6 @@ export default function Sidebar() {
           </div>
         </div>
 
-        {/* Pin / Unpin Button */}
         <div className="mb-3 hidden px-1 lg:block">
           <button
             type="button"
@@ -692,7 +695,6 @@ export default function Sidebar() {
           </button>
         </div>
 
-        {/* Navigation Items */}
         <nav className="space-y-1.5 pb-6">
           {renderNavItems(dashboardNav)}
 
