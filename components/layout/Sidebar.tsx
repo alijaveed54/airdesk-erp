@@ -172,11 +172,9 @@ export default function Sidebar() {
 
   const canInventory = isAdmin || Boolean(permission?.canInventory);
   const canR2Upload = Boolean(session) && !isSupplier && !isEmployeeRole;
-  const canImages = isAdmin || isManager || isEmployee;
+  const canImages = isAdmin;
   const canSkuParser = isAdmin;
-  const canFacebookPages = isAdmin;
-  const canFacebookPost = isAdmin || isManager || isEmployee;
-  const canFacebook = canFacebookPages || canFacebookPost;
+  const canFacebook = isAdmin;
 
   const nav = [
     {
@@ -246,17 +244,13 @@ export default function Sidebar() {
       icon: PackageCheck,
     },
     {
-      show:
-        !isSupplier &&
-        (isAdmin || isManager || isEmployee || Boolean(permission?.canReports)),
+      show: isAdmin,
       href: "/courier/tfm/inject-images",
       label: "TFM Image Injector",
       icon: PackageCheck,
     },
     {
-      show:
-        !isSupplier &&
-        (isAdmin || isManager || isEmployee || Boolean(permission?.canReports)),
+      show: isAdmin,
       href: "/courier/tfm",
       label: "TFM Shipments",
       icon: Truck,
@@ -274,19 +268,19 @@ export default function Sidebar() {
       icon: ClipboardList,
     },
     {
-      show: isAdmin || Boolean(permission?.canReports),
+      show: isAdmin,
       href: "/reports/courier",
       label: "Courier Summary",
       icon: BarChart3,
     },
     {
-      show: isAdmin || Boolean(permission?.canReports),
+      show: isAdmin,
       href: "/reports/courier-pending-update",
       label: "Courier Pending Update",
       icon: Truck,
     },
     {
-      show: isAdmin || Boolean(permission?.canReports),
+      show: isAdmin,
       href: "/reports/cod",
       label: "COD Pending",
       icon: ClipboardList,
@@ -310,7 +304,7 @@ export default function Sidebar() {
       icon: ClipboardList,
     },
     {
-      show: isAdmin || Boolean(permission?.canReports),
+      show: isAdmin,
       href: "/reports/monthly-cod",
       label: "Monthly COD Report",
       icon: BarChart3,
@@ -322,7 +316,7 @@ export default function Sidebar() {
       icon: Truck,
     },
     {
-      show: !isEmployeeRole && !isSupplier,
+      show: !isSupplier,
       href: "/reports/supplier-bill-dispatch",
       label: "Supplier Bill Dispatch",
       icon: ClipboardList,
@@ -358,7 +352,7 @@ export default function Sidebar() {
       icon: PackageCheck,
     },
     {
-      show: isAdmin || isManager || isEmployee,
+      show: isAdmin,
       href: "/reports/doha-receiving",
       label: "Doha Receiving",
       icon: PackageCheck,
@@ -511,7 +505,7 @@ export default function Sidebar() {
         item.href === "/reports/skycome-report",
     ),
     [
-      "/courier/tfm/inject",
+      "/courier/tfm/inject-images",
       "/courier/tfm",
       "/reports/skycome",
       "/reports/skycome-report",
@@ -916,55 +910,49 @@ export default function Sidebar() {
 
                 {facebookOpen && !isCollapsed && (
                   <div className="ml-5 mt-2 space-y-1 border-l-2 border-slate-200 pl-3">
-                    {canFacebookPages && (
-                      <Link
-                        href="/facebook/pages"
-                        className={childLinkClass(
-                          pathname === "/facebook/pages",
-                          "blue",
-                        )}
-                      >
-                        <span className="h-2 w-2 rounded-full bg-current" />
-                        Pages
-                      </Link>
-                    )}
+                    <Link
+                      href="/facebook/pages"
+                      className={childLinkClass(
+                        pathname === "/facebook/pages",
+                        "blue",
+                      )}
+                    >
+                      <span className="h-2 w-2 rounded-full bg-current" />
+                      Pages
+                    </Link>
 
-                    {canFacebookPost && (
-                      <>
-                        <Link
-                          href="/facebook/post"
-                          className={childLinkClass(
-                            pathname === "/facebook/post",
-                            "blue",
-                          )}
-                        >
-                          <span className="h-2 w-2 rounded-full bg-current" />
-                          Create Post
-                        </Link>
+                    <Link
+                      href="/facebook/post"
+                      className={childLinkClass(
+                        pathname === "/facebook/post",
+                        "blue",
+                      )}
+                    >
+                      <span className="h-2 w-2 rounded-full bg-current" />
+                      Create Post
+                    </Link>
 
-                        <Link
-                          href="/facebook/batch"
-                          className={childLinkClass(
-                            pathname.startsWith("/facebook/batch"),
-                            "blue",
-                          )}
-                        >
-                          <Layers3 size={15} />
-                          Batch Posts
-                        </Link>
+                    <Link
+                      href="/facebook/batch"
+                      className={childLinkClass(
+                        pathname.startsWith("/facebook/batch"),
+                        "blue",
+                      )}
+                    >
+                      <Layers3 size={15} />
+                      Batch Posts
+                    </Link>
 
-                        <Link
-                          href="/facebook/history"
-                          className={childLinkClass(
-                            pathname === "/facebook/history",
-                            "blue",
-                          )}
-                        >
-                          <span className="h-2 w-2 rounded-full bg-current" />
-                          History
-                        </Link>
-                      </>
-                    )}
+                    <Link
+                      href="/facebook/history"
+                      className={childLinkClass(
+                        pathname === "/facebook/history",
+                        "blue",
+                      )}
+                    >
+                      <span className="h-2 w-2 rounded-full bg-current" />
+                      History
+                    </Link>
                   </div>
                 )}
               </div>
