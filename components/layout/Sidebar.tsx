@@ -163,16 +163,17 @@ export default function Sidebar() {
 
   const permission = session?.permissions?.[0];
 
-  const isAdmin = session?.role === "Admin" || session?.superAdmin;
-  const canInventory = isAdmin || Boolean(permission?.canInventory);
-  const isManager = session?.role === "Manager";
-  const isEmployee = session?.role === "Employee" || session?.role === "Staff";
-  const isEmployeeRole = session?.role === "Employee";
-  const isSupplier = session?.role === "Supplier";
+  const userRole = String(session?.role || "").trim().toLowerCase();
+  const isAdmin = Boolean(userRole === "admin" || session?.superAdmin);
+  const isManager = userRole === "manager";
+  const isEmployee = userRole === "employee" || userRole === "staff";
+  const isEmployeeRole = userRole === "employee";
+  const isSupplier = userRole === "supplier";
 
+  const canInventory = isAdmin || Boolean(permission?.canInventory);
   const canR2Upload = Boolean(session) && !isSupplier && !isEmployeeRole;
   const canImages = isAdmin || isManager || isEmployee;
-  const canSkuParser = (isAdmin || isManager || isEmployee) && !isSupplier;
+  const canSkuParser = isAdmin;
   const canFacebookPages = isAdmin;
   const canFacebookPost = isAdmin || isManager || isEmployee;
   const canFacebook = canFacebookPages || canFacebookPost;
@@ -185,46 +186,31 @@ export default function Sidebar() {
       icon: LayoutDashboard,
     },
     {
-      show:
-        session?.role !== "Supplier" &&
-        (isAdmin || Boolean(permission?.canView)),
+      show: !isSupplier && (isAdmin || Boolean(permission?.canView)),
       href: "/orders/list",
       label: "Orders List",
       icon: ShoppingBag,
     },
     {
-      show:
-        session?.role !== "Supplier" &&
-        (isAdmin || Boolean(permission?.canView)),
+      show: !isSupplier && (isAdmin || Boolean(permission?.canView)),
       href: "/orders/grouped",
       label: "Grouped Orders",
       icon: ShoppingBag,
     },
     {
-      show:
-        session?.role !== "Supplier" &&
-        (isAdmin || Boolean(permission?.canView)),
+      show: !isSupplier && (isAdmin || Boolean(permission?.canView)),
       href: "/orders/quick-edit",
       label: "Orders Quick Edit",
       icon: ClipboardList,
     },
     {
-      show:
-        session?.role !== "Supplier" &&
-        (isAdmin || Boolean(permission?.canView)),
+      show: isAdmin,
       href: "/orders/uae-dispatch",
       label: "UAE Dispatch",
       icon: Truck,
     },
     {
-      show:
-        isAdmin ||
-        session?.role === "Manager" ||
-        Boolean(
-          permission?.canReceive ||
-            permission?.canDispatch ||
-            session?.role === "Supplier",
-        ),
+      show: true,
       href: "/suppliers",
       label: "Supplier Pending",
       icon: Truck,
@@ -236,9 +222,7 @@ export default function Sidebar() {
       icon: BarChart3,
     },
     {
-      show:
-        session?.role !== "Supplier" &&
-        (isAdmin || Boolean(permission?.canReports)),
+      show: !isSupplier && (isAdmin || Boolean(permission?.canReports)),
       href: "/reports/overall-sales-purchase",
       label: "Overall Sales & Purchase",
       icon: BarChart3,
@@ -246,7 +230,7 @@ export default function Sidebar() {
     {
       show:
         !isEmployeeRole &&
-        session?.role !== "Supplier" &&
+        !isSupplier &&
         (isAdmin || Boolean(permission?.canReports)),
       href: "/reports/ready-to-process",
       label: "Ready to Process",
@@ -255,7 +239,7 @@ export default function Sidebar() {
     {
       show:
         !isEmployeeRole &&
-        session?.role !== "Supplier" &&
+        !isSupplier &&
         (isAdmin || Boolean(permission?.canReports)),
       href: "/reports/instock",
       label: "In-Stock Items",
@@ -263,7 +247,7 @@ export default function Sidebar() {
     },
     {
       show:
-        session?.role !== "Supplier" &&
+        !isSupplier &&
         (isAdmin || isManager || isEmployee || Boolean(permission?.canReports)),
       href: "/courier/tfm/inject-images",
       label: "TFM Image Injector",
@@ -271,7 +255,7 @@ export default function Sidebar() {
     },
     {
       show:
-        session?.role !== "Supplier" &&
+        !isSupplier &&
         (isAdmin || isManager || isEmployee || Boolean(permission?.canReports)),
       href: "/courier/tfm",
       label: "TFM Shipments",
@@ -314,9 +298,7 @@ export default function Sidebar() {
       icon: BarChart3,
     },
     {
-      show:
-        session?.role !== "Supplier" &&
-        (isAdmin || Boolean(permission?.canReports)),
+      show: !isSupplier && (isAdmin || Boolean(permission?.canReports)),
       href: "/reports/order-pending",
       label: "Order Pending Report",
       icon: ClipboardList,
@@ -334,22 +316,19 @@ export default function Sidebar() {
       icon: BarChart3,
     },
     {
-      show:
-        isAdmin ||
-        session?.role === "Supplier" ||
-        Boolean(permission?.canReports),
+      show: isAdmin || isSupplier || Boolean(permission?.canReports),
       href: "/reports/supplier-activity",
       label: "Supplier Activity",
       icon: Truck,
     },
     {
-      show: !isEmployeeRole && session?.role !== "Supplier",
+      show: !isEmployeeRole && !isSupplier,
       href: "/reports/supplier-bill-dispatch",
       label: "Supplier Bill Dispatch",
       icon: ClipboardList,
     },
     {
-      show: !isEmployeeRole && session?.role !== "Supplier",
+      show: !isEmployeeRole && !isSupplier,
       href: "/reports/supplier-delayed",
       label: "Supplier Delayed",
       icon: Clock,
@@ -357,7 +336,7 @@ export default function Sidebar() {
     {
       show:
         !isEmployeeRole &&
-        session?.role !== "Supplier" &&
+        !isSupplier &&
         (isAdmin || Boolean(permission?.canReports)),
       href: "/reports/received-in-uae-delay",
       label: "Received In UAE Delay",
@@ -366,14 +345,14 @@ export default function Sidebar() {
     {
       show:
         !isEmployeeRole &&
-        session?.role !== "Supplier" &&
+        !isSupplier &&
         (isAdmin || Boolean(permission?.canReports)),
       href: "/india-uae-transit",
       label: "India → UAE Transit",
       icon: Truck,
     },
     {
-      show: isAdmin || isManager || isEmployee,
+      show: isAdmin,
       href: "/orders/uae-receiving",
       label: "UAE Receiving",
       icon: PackageCheck,
@@ -492,6 +471,8 @@ export default function Sidebar() {
       "/orders/grouped",
       "/orders/quick-edit",
       "/orders/uae-dispatch",
+      "/orders/uae-receiving",
+      "/orders/processing",
       "/reports/ready-to-process",
       "/exceptions",
     ],
