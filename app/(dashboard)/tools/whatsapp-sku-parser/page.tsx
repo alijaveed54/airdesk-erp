@@ -501,9 +501,8 @@ async function createWatermarkedVideoBlob(
     const video = document.createElement('video');
     video.preload = 'auto';
     video.playsInline = true;
-    video.muted = false; // Keep unmuted to capture audio track
+    video.muted = false;
 
-    // Offscreen but attached to DOM so play() works without power-saving aborts
     video.style.position = 'fixed';
     video.style.top = '-9999px';
     video.style.left = '-9999px';
@@ -516,9 +515,9 @@ async function createWatermarkedVideoBlob(
     const videoUrl = URL.createObjectURL(videoBlob);
     video.src = videoUrl;
 
-    // Web Audio setup to route sound into recording stream without blasting speaker
     let audioCtx: AudioContext | null = null;
     let audioSource: MediaElementAudioSourceNode | null = null;
+    let isCompleted = false;
 
     const cleanup = () => {
       URL.revokeObjectURL(videoUrl);
@@ -533,11 +532,12 @@ async function createWatermarkedVideoBlob(
     video.onloadedmetadata = () => {
       const width = video.videoWidth || 720;
       const height = video.videoHeight || 1280;
+      const duration = video.duration || 0;
 
       const canvas = document.createElement('canvas');
       canvas.width = width;
       canvas.height = height;
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { alpha: false });
 
       if (!ctx) {
         cleanup();
@@ -545,9 +545,13 @@ async function createWatermarkedVideoBlob(
         return;
       }
 
-      const canvasStream = canvas.captureStream(30);
+      const canvasStream = (canvas as any).captureStream ? (canvas as any).captureStream(30) : null;
+      if (!canvasStream) {
+        cleanup();
+        reject(new Error('Canvas captureStream is not supported in this browser.'));
+        return;
+      }
 
-      // Create Web Audio destination to capture original audio stream
       const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
       let combinedStream = canvasStream;
 
@@ -566,7 +570,7 @@ async function createWatermarkedVideoBlob(
             ]);
           }
         } catch (audioInitErr) {
-          console.warn('Web Audio capture fallback:', audioInitErr);
+          console.warn('Audio capture fallback:', audioInitErr);
         }
       }
 
@@ -587,7 +591,7 @@ async function createWatermarkedVideoBlob(
 
       const recorder = new MediaRecorder(combinedStream, {
         mimeType: selectedMime || undefined,
-        videoBitsPerSecond: 3500000,
+        videoBitsPerSecond: 4500000,
       });
 
       const chunks: Blob[] = [];
@@ -599,11 +603,32 @@ async function createWatermarkedVideoBlob(
 
       let animationFrameId = 0;
 
-      const drawFrame = () => {
-        if (!video.paused && !video.ended) {
+      const renderLoop = () => {
+        if (!video.ended && !isCompleted) {
           ctx.drawImage(video, 0, 0, width, height);
           drawVideoWatermarkOverlay(ctx, width, height, product, whatsappNumber);
-          animationFrameId = requestAnimationFrame(drawFrame);
+          animationFrameId = requestAnimationFrame(renderLoop);
+        }
+      };
+
+      const finishRecording = () => {
+        if (isCompleted) return;
+        isCompleted = true;
+        cancelAnimationFrame(animationFrameId);
+
+        // Draw last frame overlay
+        try {
+          ctx.drawImage(video, 0, 0, width, height);
+          drawVideoWatermarkOverlay(ctx, width, height, product, whatsappNumber);
+        } catch (_) {}
+
+        if (recorder.state === 'recording') {
+          recorder.requestData();
+          setTimeout(() => {
+            if (recorder.state === 'recording') {
+              recorder.stop();
+            }
+          }, 200);
         }
       };
 
@@ -621,11 +646,7 @@ async function createWatermarkedVideoBlob(
       };
 
       video.onended = () => {
-        setTimeout(() => {
-          if (recorder.state === 'recording') {
-            recorder.stop();
-          }
-        }, 150);
+        finishRecording();
       };
 
       const startRecordingProcess = () => {
@@ -633,15 +654,24 @@ async function createWatermarkedVideoBlob(
           audioCtx.resume().catch(() => {});
         }
         if (recorder.state !== 'recording') {
-          recorder.start(100);
+          recorder.start(500);
         }
-        drawFrame();
+        renderLoop();
+
+        // Safety timeout in case onended doesn't fire
+        if (duration > 0) {
+          setTimeout(() => {
+            if (!isCompleted) {
+              finishRecording();
+            }
+          }, (duration + 2) * 1000);
+        }
       };
 
       video.play().then(() => {
         startRecordingProcess();
       }).catch((playErr) => {
-        console.warn('Direct play error, retrying with user gesture handler:', playErr);
+        console.warn('Direct play with audio failed, falling back to muted playback:', playErr);
         video.muted = true;
         video.play().then(() => {
           startRecordingProcess();
@@ -755,7 +785,7 @@ export default function WhatsAppSkuParserPage() {
       }
 
       const mediaFiles: string[] = [];
-      const mediaMatches = blockText.matchAll(/([A-Z0-9_\-]+\.(?:jpg|jpeg|png|mp4))/gi);
+      const mediaMatches = blockText.matchAll(/([A-Z0-9_\-]+\.(?:jpg|jpeg|png|mp4|mov|webm))/gi);
       for (const m of mediaMatches) {
         mediaFiles.push(m[1]);
       }
@@ -1054,7 +1084,7 @@ export default function WhatsAppSkuParserPage() {
 
             const fileData: File = await fileHandle.getFile();
             const arrayBuf = await fileData.arrayBuffer();
-            const safeBlob = new Blob([arrayBuf], { type: fileData.type || (fileName.endsWith('.mp4') ? 'video/mp4' : 'image/jpeg') });
+            const safeBlob = new Blob([arrayBuf], { type: fileData.type || (/\.(mp4|mov|webm)$/i.test(fileName) ? 'video/mp4' : 'image/jpeg') });
 
             if (isInRoot) {
               const origFileHandle = await skuDirHandle.getFileHandle(fileName, { create: true });
@@ -1070,7 +1100,7 @@ export default function WhatsAppSkuParserPage() {
 
             const isSelectedForWatermark = selectedList.includes(fileName);
             const isImage = /\.(jpe?g|png|webp)$/i.test(fileName);
-            const isVideo = /\.mp4$/i.test(fileName);
+            const isVideo = /\.(mp4|mov|webm)$/i.test(fileName);
 
             if (isImage && isSelectedForWatermark && aedDirHandle && qarDirHandle) {
               const padIndex = String(imageCounter).padStart(2, '0');
@@ -1434,7 +1464,7 @@ export default function WhatsAppSkuParserPage() {
                                   {(item.mediaFiles || []).map((fileName, fIdx) => {
                                     const isSelected = (item.selectedMedia || []).includes(fileName);
                                     const thumbUrl = thumbnails[fileName];
-                                    const isVideo = fileName.endsWith('.mp4');
+                                    const isVideo = /\.(mp4|mov|webm)$/i.test(fileName);
 
                                     return (
                                       <div

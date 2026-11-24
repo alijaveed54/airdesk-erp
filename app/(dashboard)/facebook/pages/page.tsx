@@ -11,6 +11,7 @@ import {
   Trash2,
   X,
   XCircle,
+  Sparkles,
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 
@@ -32,6 +33,18 @@ type ApiResponse = {
   page?: FacebookPage;
 };
 
+type ParsedAccount = {
+  id?: string;
+  name?: string;
+  access_token?: string;
+};
+
+type BulkResult = {
+  updated: string[];
+  unmatched: string[];
+  failed: string[];
+};
+
 const EMPTY_FORM = {
   pageName: "",
   pageId: "",
@@ -40,6 +53,117 @@ const EMPTY_FORM = {
   active: true,
   isDefault: false,
 };
+
+function extractBalancedJsonBlocks(input: string): string[] {
+  const blocks: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let openChar = "";
+  let closeChar = "";
+  let inString = false;
+  let escapeNext = false;
+
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (ch === "\\" && inString) {
+      escapeNext = true;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      continue;
+    }
+
+    if (depth === 0) {
+      if (ch === "{") {
+        depth = 1;
+        start = i;
+        openChar = "{";
+        closeChar = "}";
+      } else if (ch === "[") {
+        depth = 1;
+        start = i;
+        openChar = "[";
+        closeChar = "]";
+      }
+    } else {
+      if (ch === openChar) {
+        depth += 1;
+      } else if (ch === closeChar) {
+        depth -= 1;
+        if (depth === 0 && start !== -1) {
+          blocks.push(input.slice(start, i + 1));
+          start = -1;
+          openChar = "";
+          closeChar = "";
+        }
+      }
+    }
+  }
+
+  return blocks;
+}
+
+function extractAccountsFromRaw(raw: string): ParsedAccount[] {
+  const cleaned = raw
+    .replace(/^\uFEFF/, "")
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .trim();
+
+  const blocks = extractBalancedJsonBlocks(cleaned);
+  if (blocks.length === 0) {
+    throw new Error("Koi complete JSON object '{...}' ya array '[...]' nahi mila.");
+  }
+
+  const collected: ParsedAccount[] = [];
+  let lastParseError: unknown = null;
+
+  for (const block of blocks) {
+    const candidate = block.replace(/,\s*([}\]])/g, "$1").trim();
+    try {
+      const parsed = JSON.parse(candidate);
+
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (item && typeof item === "object" && (item as ParsedAccount).access_token) {
+            collected.push(item as ParsedAccount);
+          }
+        }
+      } else if (parsed && typeof parsed === "object") {
+        if (Array.isArray((parsed as { data?: unknown[] }).data)) {
+          for (const item of (parsed as { data: unknown[] }).data) {
+            if (item && typeof item === "object" && (item as ParsedAccount).access_token) {
+              collected.push(item as ParsedAccount);
+            }
+          }
+        }
+        if ((parsed as ParsedAccount).access_token) {
+          collected.push(parsed as ParsedAccount);
+        }
+      }
+    } catch (err) {
+      lastParseError = err;
+    }
+  }
+
+  if (collected.length === 0 && lastParseError) {
+    throw lastParseError;
+  }
+
+  return collected;
+}
 
 export default function FacebookPagesPage() {
   const [pages, setPages] = useState<FacebookPage[]>([]);
@@ -52,6 +176,9 @@ export default function FacebookPagesPage() {
   const [reconnectToken, setReconnectToken] = useState("");
   const [reconnecting, setReconnecting] = useState(false);
   const [captionDrafts, setCaptionDrafts] = useState<Record<string, string>>({});
+  const [bulkJson, setBulkJson] = useState("");
+  const [bulkSyncing, setBulkSyncing] = useState(false);
+  const [bulkResult, setBulkResult] = useState<BulkResult | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -94,6 +221,107 @@ export default function FacebookPagesPage() {
   function clearNotices() {
     setMessage("");
     setError("");
+    setBulkResult(null);
+  }
+
+  async function handleBulkSync(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    clearNotices();
+
+    if (!bulkJson.trim()) {
+      setError("Pehle Graph API Explorer ka JSON / response paste karein.");
+      return;
+    }
+
+    let accounts: ParsedAccount[] = [];
+    try {
+      accounts = extractAccountsFromRaw(bulkJson);
+    } catch (parseErr) {
+      const detail =
+        parseErr instanceof Error ? parseErr.message : "Invalid JSON format";
+      setError(
+        `Valid JSON parse nahi ho saka (${detail}). Graph API Explorer ka pura JSON copy kar ke paste karein.`
+      );
+      return;
+    }
+
+    const validAccounts = accounts.filter(
+      (acc) =>
+        acc &&
+        typeof acc.access_token === "string" &&
+        acc.access_token.trim().length > 0
+    );
+
+    if (validAccounts.length === 0) {
+      setError("Pasted JSON mein kisi page ka access_token nahi mila.");
+      return;
+    }
+
+    setBulkSyncing(true);
+    const updated: string[] = [];
+    const unmatched: string[] = [];
+    const failed: string[] = [];
+
+    try {
+      for (const acc of validAccounts) {
+        const accPageId = String(acc.id || "").trim();
+        const accName = String(acc.name || accPageId || "Unknown Page").trim();
+        const accToken = String(acc.access_token || "").trim();
+
+        const matchedPage = pages.find(
+          (p) =>
+            (accPageId && String(p.pageId).trim() === accPageId) ||
+            (acc.name &&
+              p.pageName.trim().toLowerCase() === acc.name.trim().toLowerCase())
+        );
+
+        if (!matchedPage) {
+          unmatched.push(`${accName}${accPageId ? ` (${accPageId})` : ""}`);
+          continue;
+        }
+
+        try {
+          const response = await fetch("/api/facebook/pages", {
+            method: "PATCH",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              recordId: matchedPage.id,
+              action: "reconnect",
+              accessToken: accToken,
+            }),
+          });
+
+          const data: ApiResponse = await response.json();
+          if (!response.ok || !data.success) {
+            failed.push(`${matchedPage.pageName}: ${data.message || "Update failed"}`);
+          } else {
+            updated.push(matchedPage.pageName);
+          }
+        } catch (reqError) {
+          failed.push(
+            `${matchedPage.pageName}: ${
+              reqError instanceof Error ? reqError.message : "Network error"
+            }`
+          );
+        }
+      }
+
+      setBulkResult({ updated, unmatched, failed });
+
+      if (updated.length > 0) {
+        setMessage(`${updated.length} Facebook pages ke tokens update ho gaye.`);
+        setBulkJson("");
+        await loadPages();
+      } else if (failed.length === 0 && unmatched.length > 0) {
+        setError(
+          "Koi page saved pages list se match nahi hua. Pehle page add karein ya Page ID check karein."
+        );
+      }
+    } finally {
+      setBulkSyncing(false);
+    }
   }
 
   async function handleAddPage(event: FormEvent<HTMLFormElement>) {
@@ -207,7 +435,6 @@ export default function FacebookPagesPage() {
       setBusyId("");
     }
   }
-
 
   function openReconnect(page: FacebookPage) {
     clearNotices();
@@ -362,6 +589,61 @@ export default function FacebookPagesPage() {
           <span>{error || message}</span>
         </section>
       )}
+
+      <section className="rounded-3xl border border-blue-200 bg-blue-50/40 p-5 shadow-sm sm:p-7">
+        <div className="flex items-center gap-2.5">
+          <Sparkles size={20} className="text-blue-700" />
+          <h2 className="text-lg font-black text-slate-900">
+            Bulk Sync Tokens (Paste Graph API JSON)
+          </h2>
+        </div>
+        <p className="mt-1 text-xs font-semibold text-slate-600">
+          Graph API Explorer mein <code>me/accounts</code> ka pura JSON yahan paste karein — sab matched pages ke tokens aik sath khud update ho jayenge.
+        </p>
+
+        <form onSubmit={handleBulkSync} className="mt-4 space-y-3">
+          <textarea
+            value={bulkJson}
+            onChange={(event) => setBulkJson(event.target.value)}
+            rows={5}
+            placeholder='{"data": [{"id": "104598078233621", "name": "Westofash", "access_token": "EAA..."}]}'
+            className="w-full resize-y rounded-2xl border border-slate-200 bg-white px-4 py-3 font-mono text-xs outline-none transition focus:border-blue-400 focus:ring-4 focus:ring-blue-50"
+          />
+
+          <button
+            type="submit"
+            disabled={bulkSyncing || loading}
+            className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-blue-600 px-5 text-sm font-black text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {bulkSyncing ? (
+              <Loader2 size={17} className="animate-spin" />
+            ) : (
+              <RefreshCw size={17} />
+            )}
+            {bulkSyncing ? "Syncing Tokens..." : "Sync All Matching Pages"}
+          </button>
+        </form>
+
+        {bulkResult && (
+          <div className="mt-4 space-y-2 rounded-2xl border border-slate-200 bg-white p-4 text-xs">
+            {bulkResult.updated.length > 0 && (
+              <p className="font-bold text-emerald-700">
+                Updated ({bulkResult.updated.length}): {bulkResult.updated.join(", ")}
+              </p>
+            )}
+            {bulkResult.unmatched.length > 0 && (
+              <p className="font-bold text-amber-700">
+                Not in Saved Pages ({bulkResult.unmatched.length}): {bulkResult.unmatched.join(", ")}
+              </p>
+            )}
+            {bulkResult.failed.length > 0 && (
+              <p className="font-bold text-red-700">
+                Failed ({bulkResult.failed.length}): {bulkResult.failed.join(" | ")}
+              </p>
+            )}
+          </div>
+        )}
+      </section>
 
       <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-7">
         <h2 className="mb-5 text-lg font-black text-slate-900">

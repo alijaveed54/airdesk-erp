@@ -38,6 +38,33 @@ function formatSizeRange(minNum: number, maxNum: number): string {
   return `${minNum} to ${maxNum}`;
 }
 
+function toTitleCaseFormatted(str: string): string {
+  if (!str) return '';
+
+  const clean = str
+    .replace(/\bnack\b/gi, 'neck')
+    .replace(/\bembrodary\b/gi, 'embroidery')
+    .replace(/\bembroider\b/gi, 'embroidery')
+    .replace(/\bchikan\s*kari\b/gi, 'Chikan Kari')
+    .replace(/[*_~]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const words = clean.split(' ');
+  const keepLower = new Set(['and', 'with', 'on', 'in', 'of', 'for', 'to', 'a', 'an', 'the']);
+
+  return words
+    .map((w, index) => {
+      const lower = w.toLowerCase();
+      if (w === '&') return '&';
+      if (index > 0 && keepLower.has(lower)) {
+        return lower;
+      }
+      return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+    })
+    .join(' ');
+}
+
 function parseSizeString(text: string): string {
   const hasMargin = /margin|\+\s*margin/i.test(text);
 
@@ -102,7 +129,7 @@ function parseFabricMaterial(text: string): string {
     if (m && m[1]) {
       const cleaned = m[1].replace(/[*_~]/g, '').trim();
       if (cleaned.length > 2 && cleaned.length < 50) {
-        return cleaned;
+        return toTitleCaseFormatted(cleaned);
       }
     }
   }
@@ -112,17 +139,17 @@ function parseFabricMaterial(text: string): string {
 function parseEmbroideryDetails(text: string, isKts: boolean): string {
   if (!isKts) return '';
 
-  const isEmbroidery = /embroider|embrodary|embroidery|chikan\s*kari|thread\s*work|cording|zari/i.test(text);
+  const isEmbroidery = /embroider|embrodary|embroidery|chikan\s*kari|thread\s*work|cording|zari|nack|neck/i.test(text);
   if (!isEmbroidery) return '';
 
   const workMatch = text.match(/(?:work|pattern)\s*[:\-*]*\s*([^\n\r*]+)/i);
   if (workMatch && workMatch[1]) {
-    return workMatch[1].replace(/[*_~]/g, '').trim();
+    return toTitleCaseFormatted(workMatch[1]);
   }
 
-  const genericMatch = text.match(/([^\n\r*]*(?:embroidery|sequence|thread\s*work|zari)[^\n\r*]*)/i);
+  const genericMatch = text.match(/([^\n\r*]*(?:embroidery|sequence|thread\s*work|zari|nack|neck)[^\n\r*]*)/i);
   if (genericMatch && genericMatch[1]) {
-    return genericMatch[1].replace(/[*_~]/g, '').trim();
+    return toTitleCaseFormatted(genericMatch[1]);
   }
 
   return 'Embroidery Work';
@@ -238,7 +265,7 @@ function parseSalePriceAndSupplier(blockText: string): { salePrice: string; supp
 
         if (i + 1 < lines.length) {
           const nextLine = lines[i + 1];
-          if (/^[a-zA-Z]{2,5}$/.test(nextLine) && !/^(size\vert{}pure\vert{}soft\vert{}full\vert{}with\vert{}rate\vert{}cost\vert{}silk)$/i.test(nextLine)) {
+          if (/^[a-zA-Z]{2,5}$/.test(nextLine) && !/^(size|pure|soft|full|with|rate|cost|silk)$/i.test(nextLine)) {
             candidateCode = nextLine.toUpperCase();
             return { salePrice: candidatePrice, supplierCode: candidateCode };
           }
@@ -246,7 +273,7 @@ function parseSalePriceAndSupplier(blockText: string): { salePrice: string; supp
 
         if (i - 1 >= 0) {
           const prevLine = lines[i - 1];
-          if (/^[a-zA-Z]{2,5}$/.test(prevLine) && !/^(size\vert{}pure\vert{}soft\vert{}full\vert{}with\vert{}rate\vert{}cost\vert{}silk)$/i.test(prevLine)) {
+          if (/^[a-zA-Z]{2,5}$/.test(prevLine) && !/^(size|pure|soft|full|with|rate|cost|silk)$/i.test(prevLine)) {
             candidateCode = prevLine.toUpperCase();
             return { salePrice: candidatePrice, supplierCode: candidateCode };
           }
@@ -260,6 +287,81 @@ function parseSalePriceAndSupplier(blockText: string): { salePrice: string; supp
   }
 
   return { salePrice: '', supplierCode: '' };
+}
+
+function drawRoundedRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number
+) {
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + width - radius, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+  ctx.lineTo(x + width, y + height - radius);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  ctx.lineTo(x + radius, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawVideoWatermarkOverlay(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  product: ParsedProduct,
+  whatsappNumber: string
+) {
+  const line1 = `${product.sku} AED ${product.salePrice}`.trim();
+  const line2 = `WA ${whatsappNumber}`.trim();
+
+  const fontSize = Math.max(22, Math.round(width * 0.05));
+  ctx.font = `bold ${fontSize}px sans-serif, Arial`;
+
+  const text1Metrics = ctx.measureText(line1);
+  const text2Metrics = ctx.measureText(line2);
+
+  const padX = Math.round(fontSize * 0.9);
+  const padY = Math.round(fontSize * 0.45);
+  const pillHeight = fontSize + padY * 2;
+  const radius = Math.round(pillHeight / 2);
+
+  const pill1Width = text1Metrics.width + padX * 2;
+  const pill2Width = text2Metrics.width + padX * 2;
+
+  const gap = Math.round(fontSize * 0.35);
+  const bottomMargin = Math.round(height * 0.16);
+
+  const pill2Y = height - bottomMargin - pillHeight;
+  const pill1Y = pill2Y - gap - pillHeight;
+
+  const pill1X = (width - pill1Width) / 2;
+  const pill2X = (width - pill2Width) / 2;
+
+  ctx.save();
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
+  ctx.shadowBlur = 12;
+  ctx.shadowOffsetY = 4;
+
+  ctx.fillStyle = '#ffffff';
+  drawRoundedRect(ctx, pill1X, pill1Y, pill1Width, pillHeight, radius);
+  drawRoundedRect(ctx, pill2X, pill2Y, pill2Width, pillHeight, radius);
+
+  ctx.restore();
+
+  ctx.fillStyle = '#000000';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.font = `bold ${fontSize}px sans-serif, Arial`;
+
+  ctx.fillText(line1, width / 2, pill1Y + pillHeight / 2);
+  ctx.fillText(line2, width / 2, pill2Y + pillHeight / 2);
 }
 
 async function createWatermarkedImageBlob(
@@ -341,11 +443,12 @@ async function createWatermarkedImageBlob(
   }
 
   if (product.material) {
-    const matText = `Fabric - ${product.material}`;
+    const formattedMat = toTitleCaseFormatted(product.material);
+    const matText = `Fabric - ${formattedMat}`;
     ctx.font = `bold ${Math.round(baseFontSize * 0.85)}px Arial, sans-serif`;
     const matWidth = ctx.measureText(matText).width;
 
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
     ctx.fillRect(width - matWidth - badgePadX * 1.5, badgePadY * 0.5, matWidth + badgePadX, baseFontSize * 1.4);
 
     ctx.fillStyle = '#000000';
@@ -353,6 +456,7 @@ async function createWatermarkedImageBlob(
   }
 
   if (product.workType) {
+    const formattedWork = toTitleCaseFormatted(product.workType);
     const bottomBarHeight = Math.round(baseFontSize * 2.2);
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, height - bottomBarHeight, width, bottomBarHeight);
@@ -360,7 +464,7 @@ async function createWatermarkedImageBlob(
     ctx.fillStyle = '#000000';
     ctx.font = `bold ${Math.round(baseFontSize * 0.9)}px Arial, sans-serif`;
     ctx.textBaseline = 'middle';
-    const workDetailText = `DETAILS: ${product.workType.toUpperCase()}`;
+    const workDetailText = `DETAILS: ${formattedWork}`;
     ctx.fillText(workDetailText, badgePadX, height - bottomBarHeight / 2);
   }
 
@@ -388,6 +492,173 @@ function loadStandardImage(blob: Blob): Promise<HTMLImageElement> {
   });
 }
 
+async function createWatermarkedVideoBlob(
+  videoBlob: Blob,
+  product: ParsedProduct,
+  whatsappNumber: string
+): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement('video');
+    video.preload = 'auto';
+    video.playsInline = true;
+    video.muted = false; // Keep unmuted to capture audio track
+
+    // Offscreen but attached to DOM so play() works without power-saving aborts
+    video.style.position = 'fixed';
+    video.style.top = '-9999px';
+    video.style.left = '-9999px';
+    video.style.width = '1px';
+    video.style.height = '1px';
+    video.style.opacity = '0';
+    video.style.pointerEvents = 'none';
+    document.body.appendChild(video);
+
+    const videoUrl = URL.createObjectURL(videoBlob);
+    video.src = videoUrl;
+
+    // Web Audio setup to route sound into recording stream without blasting speaker
+    let audioCtx: AudioContext | null = null;
+    let audioSource: MediaElementAudioSourceNode | null = null;
+
+    const cleanup = () => {
+      URL.revokeObjectURL(videoUrl);
+      if (audioCtx && audioCtx.state !== 'closed') {
+        audioCtx.close().catch(() => {});
+      }
+      if (video.parentNode) {
+        video.parentNode.removeChild(video);
+      }
+    };
+
+    video.onloadedmetadata = () => {
+      const width = video.videoWidth || 720;
+      const height = video.videoHeight || 1280;
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+
+      if (!ctx) {
+        cleanup();
+        reject(new Error('Canvas 2D context unavailable'));
+        return;
+      }
+
+      const canvasStream = canvas.captureStream(30);
+
+      // Create Web Audio destination to capture original audio stream
+      const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
+      let combinedStream = canvasStream;
+
+      if (AudioCtxClass) {
+        try {
+          audioCtx = new AudioCtxClass();
+          audioSource = audioCtx.createMediaElementSource(video);
+          const audioDestination = audioCtx.createMediaStreamDestination();
+          audioSource.connect(audioDestination);
+
+          const audioTracks = audioDestination.stream.getAudioTracks();
+          if (audioTracks.length > 0) {
+            combinedStream = new MediaStream([
+              ...canvasStream.getVideoTracks(),
+              ...audioTracks,
+            ]);
+          }
+        } catch (audioInitErr) {
+          console.warn('Web Audio capture fallback:', audioInitErr);
+        }
+      }
+
+      const mimeCandidates = [
+        'video/mp4;codecs=avc1,mp4a.40.2',
+        'video/mp4',
+        'video/webm;codecs=vp9,opus',
+        'video/webm;codecs=vp8,opus',
+        'video/webm'
+      ];
+      let selectedMime = '';
+      for (const candidate of mimeCandidates) {
+        if (MediaRecorder.isTypeSupported(candidate)) {
+          selectedMime = candidate;
+          break;
+        }
+      }
+
+      const recorder = new MediaRecorder(combinedStream, {
+        mimeType: selectedMime || undefined,
+        videoBitsPerSecond: 3500000,
+      });
+
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          chunks.push(e.data);
+        }
+      };
+
+      let animationFrameId = 0;
+
+      const drawFrame = () => {
+        if (!video.paused && !video.ended) {
+          ctx.drawImage(video, 0, 0, width, height);
+          drawVideoWatermarkOverlay(ctx, width, height, product, whatsappNumber);
+          animationFrameId = requestAnimationFrame(drawFrame);
+        }
+      };
+
+      recorder.onstop = () => {
+        cancelAnimationFrame(animationFrameId);
+        cleanup();
+        const finalBlob = new Blob(chunks, { type: selectedMime || 'video/mp4' });
+        resolve(finalBlob);
+      };
+
+      recorder.onerror = (err) => {
+        cancelAnimationFrame(animationFrameId);
+        cleanup();
+        reject(err);
+      };
+
+      video.onended = () => {
+        setTimeout(() => {
+          if (recorder.state === 'recording') {
+            recorder.stop();
+          }
+        }, 150);
+      };
+
+      const startRecordingProcess = () => {
+        if (audioCtx && audioCtx.state === 'suspended') {
+          audioCtx.resume().catch(() => {});
+        }
+        if (recorder.state !== 'recording') {
+          recorder.start(100);
+        }
+        drawFrame();
+      };
+
+      video.play().then(() => {
+        startRecordingProcess();
+      }).catch((playErr) => {
+        console.warn('Direct play error, retrying with user gesture handler:', playErr);
+        video.muted = true;
+        video.play().then(() => {
+          startRecordingProcess();
+        }).catch((err) => {
+          cleanup();
+          reject(err);
+        });
+      });
+    };
+
+    video.onerror = () => {
+      cleanup();
+      reject(new Error('Video file load/decode failed'));
+    };
+  });
+}
+
 export default function WhatsAppSkuParserPage() {
   const [products, setProducts] = useState<ParsedProduct[]>([]);
   const [statusMsg, setStatusMsg] = useState<string>('');
@@ -397,6 +668,7 @@ export default function WhatsAppSkuParserPage() {
   const [filterStartDate, setFilterStartDate] = useState<string>('');
   const [filterStartSku, setFilterStartSku] = useState<string>('');
   const [assignStartSku, setAssignStartSku] = useState<string>('');
+  const [whatsappNumber, setWhatsappNumber] = useState<string>('050 47 33 260');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
   const [dirHandle, setDirHandle] = useState<any>(null);
@@ -607,7 +879,7 @@ export default function WhatsAppSkuParserPage() {
       return copy;
     });
 
-    setStatusMsg(`Moved image "${fileName}" to SKU "${targetSku}".`);
+    setStatusMsg(`Moved file "${fileName}" to SKU "${targetSku}".`);
   };
 
   const connectFolderForThumbnails = async () => {
@@ -620,13 +892,12 @@ export default function WhatsAppSkuParserPage() {
       // @ts-ignore
       const handle = await window.showDirectoryPicker();
       setDirHandle(handle);
-      setStatusMsg('Loading image thumbnails from folder...');
+      setStatusMsg('Loading thumbnails from folder...');
 
       const newThumbs: Record<string, string> = {};
 
       for (const prod of products) {
         for (const fileName of prod.mediaFiles) {
-          if (!/\.(jpe?g|png|webp)$/i.test(fileName)) continue;
           if (newThumbs[fileName]) continue;
 
           try {
@@ -650,7 +921,7 @@ export default function WhatsAppSkuParserPage() {
       }
 
       setThumbnails(newThumbs);
-      setStatusMsg(`Connected! Loaded ${Object.keys(newThumbs).length} image thumbnails successfully.`);
+      setStatusMsg(`Connected! Loaded ${Object.keys(newThumbs).length} thumbnails successfully.`);
     } catch (err: any) {
       if (err.name !== 'AbortError') {
         setStatusMsg(`Folder connection error: ${err.message}`);
@@ -731,15 +1002,16 @@ export default function WhatsAppSkuParserPage() {
       }
 
       setIsProcessingFiles(true);
-      setStatusMsg('Processing images and moving to folders...');
+      setStatusMsg('Processing media and organizing folders...');
 
       // @ts-ignore
       const rootDirHandle = dirHandle || (await window.showDirectoryPicker());
       if (!dirHandle) setDirHandle(rootDirHandle);
 
       let movedOriginalCount = 0;
-      let watermarkedAedCount = 0;
-      let watermarkedQarCount = 0;
+      let watermarkedAedImageCount = 0;
+      let watermarkedQarImageCount = 0;
+      let watermarkedAedVideoCount = 0;
 
       for (let pIdx = 0; pIdx < products.length; pIdx++) {
         const item = products[pIdx];
@@ -755,10 +1027,14 @@ export default function WhatsAppSkuParserPage() {
 
         if (selectedList.length > 0) {
           aedDirHandle = await skuDirHandle.getDirectoryHandle('AED', { create: true });
-          qarDirHandle = await skuDirHandle.getDirectoryHandle('QAR', { create: true });
+          const hasImageSelected = selectedList.some(f => /\.(jpe?g|png|webp)$/i.test(f));
+          if (hasImageSelected) {
+            qarDirHandle = await skuDirHandle.getDirectoryHandle('QAR', { create: true });
+          }
         }
 
         let imageCounter = 1;
+        let videoCounter = 1;
 
         for (const fileName of item.mediaFiles) {
           try {
@@ -778,7 +1054,7 @@ export default function WhatsAppSkuParserPage() {
 
             const fileData: File = await fileHandle.getFile();
             const arrayBuf = await fileData.arrayBuffer();
-            const safeBlob = new Blob([arrayBuf], { type: fileData.type || 'image/jpeg' });
+            const safeBlob = new Blob([arrayBuf], { type: fileData.type || (fileName.endsWith('.mp4') ? 'video/mp4' : 'image/jpeg') });
 
             if (isInRoot) {
               const origFileHandle = await skuDirHandle.getFileHandle(fileName, { create: true });
@@ -794,10 +1070,11 @@ export default function WhatsAppSkuParserPage() {
 
             const isSelectedForWatermark = selectedList.includes(fileName);
             const isImage = /\.(jpe?g|png|webp)$/i.test(fileName);
+            const isVideo = /\.mp4$/i.test(fileName);
 
             if (isImage && isSelectedForWatermark && aedDirHandle && qarDirHandle) {
               const padIndex = String(imageCounter).padStart(2, '0');
-              const cleanMat = item.material ? `Fabric - ${item.material}` : '';
+              const cleanMat = item.material ? `Fabric - ${toTitleCaseFormatted(item.material)}` : '';
               const cleanSize = (item.size || '').trim();
               const sizeInName = cleanSize ? `Size - ${cleanSize}` : '';
 
@@ -810,18 +1087,38 @@ export default function WhatsAppSkuParserPage() {
                 const aedWritable = await aedFileHandle.createWritable();
                 await aedWritable.write(aedBlob);
                 await aedWritable.close();
-                watermarkedAedCount++;
+                watermarkedAedImageCount++;
 
                 const qarBlob = await createWatermarkedImageBlob(safeBlob, 'QAR', item);
                 const qarFileHandle = await qarDirHandle.getFileHandle(qarFileName, { create: true });
                 const qarWritable = await qarFileHandle.createWritable();
                 await qarWritable.write(qarBlob);
                 await qarWritable.close();
-                watermarkedQarCount++;
+                watermarkedQarImageCount++;
 
                 imageCounter++;
               } catch (wmErr) {
-                console.error(`Watermark error on ${fileName}:`, wmErr);
+                console.error(`Image watermark error on ${fileName}:`, wmErr);
+              }
+            } else if (isVideo && isSelectedForWatermark && aedDirHandle) {
+              const padIndex = String(videoCounter).padStart(2, '0');
+              const cleanMat = item.material ? `Fabric - ${toTitleCaseFormatted(item.material)}` : '';
+              const cleanSize = (item.size || '').trim();
+              const sizeInName = cleanSize ? `Size - ${cleanSize}` : '';
+
+              const aedVideoName = `${item.sku} - AED ${item.salePrice} (${padIndex}) ${sizeInName} ${cleanMat}.mp4`.replace(/\s+/g, ' ').trim();
+
+              try {
+                setStatusMsg(`Rendering watermark for video ${fileName} (${item.sku})...`);
+                const wmVideoBlob = await createWatermarkedVideoBlob(safeBlob, item, whatsappNumber.trim());
+                const videoFileHandle = await aedDirHandle.getFileHandle(aedVideoName, { create: true });
+                const videoWritable = await videoFileHandle.createWritable();
+                await videoWritable.write(wmVideoBlob);
+                await videoWritable.close();
+                watermarkedAedVideoCount++;
+                videoCounter++;
+              } catch (videoErr) {
+                console.error(`Video watermark error on ${fileName}:`, videoErr);
               }
             }
           } catch (err) {
@@ -831,7 +1128,7 @@ export default function WhatsAppSkuParserPage() {
       }
 
       setStatusMsg(
-        `Complete! Moved ${movedOriginalCount} originals. Watermarked ${watermarkedAedCount} AED and ${watermarkedQarCount} QAR images.`
+        `Complete! Moved ${movedOriginalCount} originals. Watermarked ${watermarkedAedImageCount} AED images, ${watermarkedQarImageCount} QAR images, and ${watermarkedAedVideoCount} AED videos.`
       );
     } catch (error: any) {
       if (error.name !== 'AbortError') {
@@ -849,9 +1146,9 @@ export default function WhatsAppSkuParserPage() {
     <div className="p-6 max-w-7xl mx-auto space-y-6">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b pb-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">WhatsApp Product Chat Parser & Image Organizer</h1>
+          <h1 className="text-2xl font-bold text-gray-900">WhatsApp Product Chat Parser & Media Organizer</h1>
           <p className="text-sm text-gray-500">
-            Export WhatsApp chat, preview large thumbnails, reassign images between SKUs, tick for watermark & export Excel.
+            Export WhatsApp chat, preview large thumbnails, watermark images (AED & QAR) & videos (AED WA Badge).
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -881,7 +1178,7 @@ export default function WhatsAppSkuParserPage() {
 
       {/* Upload and Filter Controls */}
       <div className="bg-white border rounded-lg p-5 shadow-sm space-y-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 items-end">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-4 items-end">
           <div>
             <label className="block text-xs font-semibold text-gray-700 mb-1">WhatsApp Chat File (.txt)</label>
             <input
@@ -944,6 +1241,19 @@ export default function WhatsAppSkuParserPage() {
                 Apply
               </button>
             </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-gray-700 mb-1">
+              Video WA Number
+            </label>
+            <input
+              type="text"
+              placeholder="050 47 33 260"
+              value={whatsappNumber}
+              onChange={(e) => setWhatsappNumber(e.target.value)}
+              className="border rounded px-3 py-1.5 w-full text-xs font-mono focus:ring-1 focus:ring-emerald-500"
+            />
           </div>
         </div>
 
@@ -1078,7 +1388,7 @@ export default function WhatsAppSkuParserPage() {
                                 ? 'bg-blue-600 text-white border-blue-600'
                                 : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'
                             }`}
-                            title="Open Image Previews & Selection"
+                            title="Open Media Previews & Selection"
                           >
                             <span>{isExpanded ? '−' : '+'}</span>
                             <span className="text-[10px] font-mono">({totalCount})</span>
@@ -1086,7 +1396,7 @@ export default function WhatsAppSkuParserPage() {
                         </td>
                       </tr>
 
-                      {/* Expandable Section: Large Image Thumbnails + Selector */}
+                      {/* Expandable Section: Media Thumbnails + Selector */}
                       {isExpanded && (
                         <tr className="bg-slate-50 border-y">
                           <td colSpan={9} className="p-4">
@@ -1095,7 +1405,7 @@ export default function WhatsAppSkuParserPage() {
                                 <div className="flex justify-between items-center pb-2 border-b mb-3">
                                   <div>
                                     <span className="font-bold text-gray-800 text-sm">
-                                      Click Images to Select for Watermark (AED & QAR)
+                                      Click Images & Videos to Select for Watermark
                                     </span>
                                     <span className="text-gray-500 ml-2 text-xs font-mono font-medium">
                                       ({selectedCount} of {totalCount} selected)
@@ -1119,7 +1429,7 @@ export default function WhatsAppSkuParserPage() {
                                   </div>
                                 </div>
 
-                                {/* Large Thumbnail Grid (h-56) */}
+                                {/* Thumbnail Grid */}
                                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3.5">
                                   {(item.mediaFiles || []).map((fileName, fIdx) => {
                                     const isSelected = (item.selectedMedia || []).includes(fileName);
@@ -1129,21 +1439,32 @@ export default function WhatsAppSkuParserPage() {
                                     return (
                                       <div
                                         key={fIdx}
-                                        onClick={() => !isVideo && toggleMediaSelection(idx, fileName)}
+                                        onClick={() => toggleMediaSelection(idx, fileName)}
                                         className={`relative group rounded-lg border-2 overflow-hidden flex flex-col cursor-pointer transition ${
                                           isSelected
                                             ? 'border-emerald-500 ring-2 ring-emerald-300 shadow-md bg-emerald-50/10'
                                             : 'border-gray-200 bg-gray-50 hover:border-gray-400'
                                         }`}
                                       >
-                                        {/* Large Preview Area */}
+                                        {/* Preview Area */}
                                         <div className="w-full h-56 bg-gray-100 flex items-center justify-center overflow-hidden relative">
                                           {thumbUrl ? (
-                                            <img
-                                              src={thumbUrl}
-                                              alt={fileName}
-                                              className="w-full h-full object-cover transition duration-150 group-hover:scale-105"
-                                            />
+                                            isVideo ? (
+                                              <video
+                                                src={thumbUrl}
+                                                className="w-full h-full object-cover"
+                                                muted
+                                                playsInline
+                                                onMouseEnter={(e) => (e.target as HTMLVideoElement).play().catch(() => {})}
+                                                onMouseLeave={(e) => (e.target as HTMLVideoElement).pause()}
+                                              />
+                                            ) : (
+                                              <img
+                                                src={thumbUrl}
+                                                alt={fileName}
+                                                className="w-full h-full object-cover transition duration-150 group-hover:scale-105"
+                                              />
+                                            )
                                           ) : (
                                             <div className="text-center p-3 text-gray-400">
                                               {isVideo ? (
@@ -1154,27 +1475,30 @@ export default function WhatsAppSkuParserPage() {
                                               <span className="text-xs font-medium">
                                                 {isVideo ? 'Video File' : 'No Preview'}
                                               </span>
-                                              {!isVideo && (
-                                                <span className="block text-[10px] text-gray-400 mt-1">
-                                                  Click "Connect Folder"
-                                                </span>
-                                              )}
+                                              <span className="block text-[10px] text-gray-400 mt-1">
+                                                Click &quot;Connect Folder&quot;
+                                              </span>
                                             </div>
                                           )}
 
                                           {/* Floating Checkbox Badge */}
-                                          {!isVideo && (
-                                            <div className="absolute top-2 left-2 bg-white/95 backdrop-blur rounded-md px-2 py-1 shadow flex items-center gap-1.5 border">
-                                              <input
-                                                type="checkbox"
-                                                checked={isSelected}
-                                                onChange={() => toggleMediaSelection(idx, fileName)}
-                                                onClick={(e) => e.stopPropagation()}
-                                                className="w-4 h-4 text-emerald-600 rounded focus:ring-emerald-500 cursor-pointer"
-                                              />
-                                              <span className="text-[11px] font-bold text-gray-700">
-                                                {isSelected ? 'Watermark' : 'Skip'}
-                                              </span>
+                                          <div className="absolute top-2 left-2 bg-white/95 backdrop-blur rounded-md px-2 py-1 shadow flex items-center gap-1.5 border">
+                                            <input
+                                              type="checkbox"
+                                              checked={isSelected}
+                                              onChange={() => toggleMediaSelection(idx, fileName)}
+                                              onClick={(e) => e.stopPropagation()}
+                                              className="w-4 h-4 text-emerald-600 rounded focus:ring-emerald-500 cursor-pointer"
+                                            />
+                                            <span className="text-[11px] font-bold text-gray-700">
+                                              {isSelected ? 'Watermark' : 'Skip'}
+                                            </span>
+                                          </div>
+
+                                          {/* Video Indicator Chip */}
+                                          {isVideo && (
+                                            <div className="absolute top-2 right-2 bg-black/75 text-white font-mono text-[10px] px-1.5 py-0.5 rounded">
+                                              VIDEO (AED)
                                             </div>
                                           )}
                                         </div>
@@ -1190,7 +1514,7 @@ export default function WhatsAppSkuParserPage() {
                                               value={item.sku}
                                               onChange={(e) => moveMediaToSku(idx, fileName, e.target.value)}
                                               className="w-full text-[11px] font-mono bg-gray-50 border border-gray-300 rounded px-1.5 py-0.5 text-gray-700 focus:bg-white focus:ring-1 focus:ring-blue-500 cursor-pointer"
-                                              title="Reassign image to another SKU"
+                                              title="Reassign media to another SKU"
                                             >
                                               {products.map((p) => (
                                                 <option key={p.id} value={p.sku}>

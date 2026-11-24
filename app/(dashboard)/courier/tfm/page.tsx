@@ -178,6 +178,7 @@ type ShipmentActionResponse = {
     awbNumber?: string;
     shipmentId?: string;
     status?: string;
+    bookingDate?: string;
     lastActionDate?: string;
     location?: string;
     expectedDelivery?: string;
@@ -227,7 +228,6 @@ type LiveTrackingSyncState = {
 };
 
 const LIVE_TRACKING_CHUNK_SIZE = 10;
-const AUTO_LIVE_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 
 const BULK_BATCH_STORAGE_KEY =
   "mysmar-tfm-bulk-batch-v1";
@@ -258,6 +258,19 @@ const EMPTY_STATUS_COUNTS: StatusCounts = {
   Cancelled: 0,
   Unknown: 0,
 };
+
+function isTerminalOrder(order: Pick<TfmOrder, "statusGroup" | "orderStatus">) {
+  const normalizedOrderStatus = String(order.orderStatus || "")
+    .trim()
+    .toLowerCase();
+
+  return (
+    order.statusGroup === "Delivered" ||
+    order.statusGroup === "Returned" ||
+    normalizedOrderStatus === "delivered" ||
+    normalizedOrderStatus === "returned"
+  );
+}
 
 function money(value: number) {
   return new Intl.NumberFormat("en-AE", {
@@ -377,9 +390,7 @@ export default function TfmStatusDashboardPage() {
     useState<BulkBatchState | null>(null);
   const [liveTrackingSync, setLiveTrackingSync] =
     useState<LiveTrackingSyncState | null>(null);
-  const [autoSyncEnabled, setAutoSyncEnabled] = useState(true);
   const bulkRunningRef = useRef(false);
-  const initialAutoSyncRef = useRef(false);
   const bulkPauseRequestedRef = useRef(false);
   const bulkCancelRequestedRef = useRef(false);
 
@@ -423,7 +434,8 @@ export default function TfmStatusDashboardPage() {
             (order) =>
               order.recordId === recordId &&
               order.valid &&
-              order.canCreateNewAwb !== false,
+              order.canCreateNewAwb !== false &&
+              !isTerminalOrder(order),
           ),
         ),
       );
@@ -444,18 +456,6 @@ export default function TfmStatusDashboardPage() {
   useEffect(() => {
     void load();
   }, [load]);
-
-  useEffect(() => {
-    const saved = window.localStorage.getItem("mysmar-tfm-auto-sync-v1");
-    if (saved === "off") setAutoSyncEnabled(false);
-  }, []);
-
-  useEffect(() => {
-    window.localStorage.setItem(
-      "mysmar-tfm-auto-sync-v1",
-      autoSyncEnabled ? "on" : "off",
-    );
-  }, [autoSyncEnabled]);
 
   useEffect(() => {
     try {
@@ -522,6 +522,7 @@ export default function TfmStatusDashboardPage() {
         !query ||
         [
           order.orderNo,
+          order.orderStatus,
           order.customerName,
           order.phone,
           order.city,
@@ -560,101 +561,27 @@ export default function TfmStatusDashboardPage() {
   const selectableOrders = filteredOrders.filter(
     (order) =>
       order.valid &&
-      order.canCreateNewAwb !== false,
+      order.canCreateNewAwb !== false &&
+      !isTerminalOrder(order),
   );
 
   const liveTrackableOrders = useMemo(
     () =>
       orders.filter((order) => {
-        // TFM can be tracked by AWB, Shipment ID, or the Mysmar Order No that
-        // was sent to TFM as the Shipper Reference. Do not hide no-AWB orders.
         if (!Boolean(order.awbNumber || order.shipmentId || order.orderNo)) {
           return false;
         }
-        if (["Returned", "Cancelled"].includes(order.statusGroup)) return false;
-
-        // Manual live tracking can still re-check delivered COD shipments
-        // until TFM releases COD. Automatic polling is filtered separately.
-        if (order.statusGroup === "Delivered") {
-          return order.codAmount > 0 && !order.codReceived;
+        // Once Delivered or Returned, exclude from button sync/tracking actions
+        if (isTerminalOrder(order)) {
+          return false;
         }
-
+        if (["Cancelled"].includes(order.statusGroup)) {
+          return false;
+        }
         return true;
       }),
     [orders],
   );
-
-  const autoTrackableOrders = useMemo(
-    () =>
-      liveTrackableOrders.filter((order) => {
-        const erpOrderStatus = String(order.orderStatus || "")
-          .trim()
-          .toLowerCase()
-          .replace(/[_-]+/g, " ")
-          .replace(/\s+/g, " ");
-
-        const hasDirectTrackingId = Boolean(
-          order.awbNumber || order.shipmentId,
-        );
-        const looksBookedByReference =
-          Boolean(order.orderNo) &&
-          (order.statusGroup !== "Unknown" ||
-            erpOrderStatus === "dispatched" ||
-            erpOrderStatus === "dispatch" ||
-            erpOrderStatus === "ofd" ||
-            erpOrderStatus.includes("out for delivery") ||
-            erpOrderStatus.includes("in transit"));
-
-        // Avoid polling every unbooked Order Received row just because it has
-        // an Order No. No-AWB auto-sync is enabled only when the ERP/TFM state
-        // indicates that the shipment was already sent to TFM.
-        if (!hasDirectTrackingId && !looksBookedByReference) return false;
-
-        // Once ERP or TFM confirms Delivered, remove it from the recurring
-        // five-minute auto-sync queue. Manual tracking remains available.
-        return (
-          erpOrderStatus !== "delivered" &&
-          order.statusGroup !== "Delivered"
-        );
-      }),
-    [liveTrackableOrders],
-  );
-
-  useEffect(() => {
-    if (
-      !autoSyncEnabled ||
-      !config?.configuration?.trackingReady ||
-      !autoTrackableOrders.length
-    ) {
-      return;
-    }
-
-    let initialTimer = 0;
-
-    if (!initialAutoSyncRef.current && !actionBusy) {
-      initialAutoSyncRef.current = true;
-      initialTimer = window.setTimeout(() => {
-        if (document.visibilityState === "visible") {
-          void syncAllLiveTracking(false);
-        }
-      }, 5000);
-    }
-
-    const interval = window.setInterval(() => {
-      if (document.visibilityState !== "visible" || actionBusy) return;
-      void syncAllLiveTracking(false);
-    }, AUTO_LIVE_SYNC_INTERVAL_MS);
-
-    return () => {
-      if (initialTimer) window.clearTimeout(initialTimer);
-      window.clearInterval(interval);
-    };
-  }, [
-    autoSyncEnabled,
-    config?.configuration?.trackingReady,
-    autoTrackableOrders.length,
-    actionBusy,
-  ]);
 
   const allVisibleSelected =
     selectableOrders.length > 0 &&
@@ -676,7 +603,8 @@ export default function TfmStatusDashboardPage() {
   function toggleOrder(order: TfmOrder) {
     if (
       !order.valid ||
-      order.canCreateNewAwb === false
+      order.canCreateNewAwb === false ||
+      isTerminalOrder(order)
     ) {
       return;
     }
@@ -820,10 +748,25 @@ export default function TfmStatusDashboardPage() {
   ) {
     if (!recordIds.length) return;
 
+    const filteredRecordIds =
+      action === "track"
+        ? recordIds.filter((id) => {
+            const ord = orders.find((o) => o.recordId === id);
+            return ord ? !isTerminalOrder(ord) : true;
+          })
+        : recordIds;
+
+    if (!filteredRecordIds.length) {
+      setActionMessage(
+        "Delivered ya Returned orders par dobara status update nahi hota.",
+      );
+      return;
+    }
+
     if (
       action === "cancel" &&
       !window.confirm(
-        `Cancel ${recordIds.length} TFM shipment(s)? This action may not be reversible.`,
+        `Cancel ${filteredRecordIds.length} TFM shipment(s)? This action may not be reversible.`,
       )
     ) {
       return;
@@ -833,7 +776,7 @@ export default function TfmStatusDashboardPage() {
       action === "create"
         ? orders.filter(
             (order) =>
-              recordIds.includes(order.recordId) &&
+              filteredRecordIds.includes(order.recordId) &&
               Boolean(order.awbNumber),
           )
         : [];
@@ -846,7 +789,7 @@ export default function TfmStatusDashboardPage() {
 
     if (existingAwbOrders.length > 0 && !confirmExistingAwb) return;
 
-    const key = `${action}:${recordIds.join(",")}`;
+    const key = `${action}:${filteredRecordIds.join(",")}`;
     setActionBusy(key);
     setActionMessage("");
     setActionError("");
@@ -859,7 +802,7 @@ export default function TfmStatusDashboardPage() {
         cache: "no-store",
         body: JSON.stringify({
           action,
-          recordIds,
+          recordIds: filteredRecordIds,
           confirmExistingAwb,
         }),
       });
@@ -873,7 +816,7 @@ export default function TfmStatusDashboardPage() {
           1,
           Number(
             response.headers.get("x-tfm-label-count") ||
-              recordIds.length,
+              filteredRecordIds.length,
           ) || 1,
         );
         const failedCount = Math.max(
@@ -899,7 +842,7 @@ export default function TfmStatusDashboardPage() {
         link.href = url;
         link.download =
           match?.[1] ||
-          (recordIds.length > 1
+          (filteredRecordIds.length > 1
             ? `TFM-Bulk-Labels-${labelCount}.pdf`
             : `TFM-${labelOrderNo || "label"}.pdf`);
         document.body.appendChild(link);
@@ -957,10 +900,8 @@ export default function TfmStatusDashboardPage() {
     }
   }
 
-  async function syncAllLiveTracking(interactive = true) {
-    const trackingOrders = interactive
-      ? liveTrackableOrders
-      : autoTrackableOrders;
+  async function syncAllLiveTracking() {
+    const trackingOrders = liveTrackableOrders;
 
     if (
       !config?.configuration?.trackingReady ||
@@ -970,21 +911,16 @@ export default function TfmStatusDashboardPage() {
       return;
     }
 
-    if (interactive) {
-      const approved = window.confirm(
-        [
-          `Sync live TFM tracking for ${trackingOrders.length} shipment(s)?`,
-          `Chunk size: ${LIVE_TRACKING_CHUNK_SIZE}`,
-          "If AWB is blank, Order No is used as the TFM Shipper Reference.",
-          "Delivered COD shipments remain available for manual tracking until COD is released.",
-          "Automatic sync skips orders as soon as ERP/TFM status is Delivered.",
-          "TFM Checked In/In Transit → Dispatched, OFD → OFD, Delivered → Delivered.",
-          "TFM COD Released → COD Status Received + COD Receive Date.",
-        ].join("\n"),
-      );
+    const approved = window.confirm(
+      [
+        `Sync live TFM tracking for ${trackingOrders.length} active shipment(s)?`,
+        "Delivered and Returned orders are excluded automatically.",
+        "Order No is used to find/track AWB in TFM and update TFM AWB, TFM Status, TFM Booking Date, and TFM Last Action Date.",
+        "Delivered / Returned updates order_status in Airtable as well.",
+      ].join("\n"),
+    );
 
-      if (!approved) return;
-    }
+    if (!approved) return;
 
     const recordIds = trackingOrders.map(
       (order) => order.recordId,
@@ -1121,7 +1057,7 @@ export default function TfmStatusDashboardPage() {
 
       setActionFailures(failures);
       setActionMessage(
-        `${interactive ? "Live" : "Automatic"} tracking sync complete: ${successful} updated, ${failed} failed.`,
+        `Tracking sync complete: ${successful} updated, ${failed} failed.`,
       );
 
       await load();
@@ -1365,6 +1301,7 @@ export default function TfmStatusDashboardPage() {
       (order) =>
         order.valid &&
         order.canCreateNewAwb !== false &&
+        !isTerminalOrder(order) &&
         !order.awbNumber,
     );
     const skippedResults = selectedOrders
@@ -1378,17 +1315,19 @@ export default function TfmStatusDashboardPage() {
       .map((order) =>
         skippedBulkResult(
           order,
-          order.awbNumber
-            ? `Existing AWB ${order.awbNumber} was skipped. Bulk mode never replaces an AWB.`
-            : !order.valid
-              ? "Order validation failed and was skipped."
-              : "Order is not eligible for a new AWB and was skipped.",
+          isTerminalOrder(order)
+            ? `Order is ${order.statusGroup || order.orderStatus} and was skipped.`
+            : order.awbNumber
+              ? `Existing AWB ${order.awbNumber} was skipped. Bulk mode never replaces an AWB.`
+              : !order.valid
+                ? "Order validation failed and was skipped."
+                : "Order is not eligible for a new AWB and was skipped.",
         ),
       );
 
     if (!eligibleOrders.length) {
       setActionError(
-        "No selected order is eligible for bulk AWB creation. Existing AWBs are skipped for safety.",
+        "No selected order is eligible for bulk AWB creation. Existing AWBs and Delivered/Returned orders are skipped for safety.",
       );
       return;
     }
@@ -1550,7 +1489,8 @@ export default function TfmStatusDashboardPage() {
       .filter(
         (order) =>
           selected.includes(order.recordId) &&
-          Boolean(order.awbNumber || order.shipmentId),
+          !isTerminalOrder(order) &&
+          Boolean(order.awbNumber || order.shipmentId || order.orderNo),
       )
       .map((order) => order.recordId);
   }
@@ -1659,10 +1599,9 @@ export default function TfmStatusDashboardPage() {
           </h1>
 
           <p className="mt-1 max-w-3xl text-sm font-bold leading-6 text-slate-500">
-            Review imported AWBs, current courier status,
-            last movement, pending shipments and pre-booking
-            validation. Existing AWBs are warnings and do not
-            block a future new AWB.
+            Button click par TFM se order number ke zariye AWB search/track aur
+            TFM AWB, TFM Status, TFM Booking Date, TFM Last Action Date update
+            hote hain. Delivered ya Returned orders par dobara update nahi hota.
           </p>
         </div>
 
@@ -1687,7 +1626,7 @@ export default function TfmStatusDashboardPage() {
 
           <button
             type="button"
-            onClick={() => void syncAllLiveTracking(true)}
+            onClick={() => void syncAllLiveTracking()}
             disabled={
               !config?.configuration?.trackingReady ||
               !liveTrackableOrders.length ||
@@ -1701,21 +1640,6 @@ export default function TfmStatusDashboardPage() {
               <Radio size={17} />
             )}
             Sync All Live ({liveTrackableOrders.length})
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setAutoSyncEnabled((current) => !current)}
-            className={[
-              "inline-flex h-11 items-center justify-center gap-2 rounded-xl border px-4 text-sm font-black transition",
-              autoSyncEnabled
-                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                : "border-slate-200 bg-white text-slate-500",
-            ].join(" ")}
-            title="Automatically sync active non-delivered TFM shipments every 5 minutes while this dashboard is open"
-          >
-            <Radio size={17} />
-            Auto Sync {autoSyncEnabled ? "ON" : "OFF"}
           </button>
 
           <button
@@ -1785,7 +1709,7 @@ export default function TfmStatusDashboardPage() {
                 <p className="mt-1 text-sm font-bold leading-6 text-slate-500">
                   {config.configuration?.authenticationReady
                     ? config.configuration.liveRequestsAllowed
-                      ? "Credentials are configured and live TFM requests are enabled."
+                      ? "Credentials are configured and manual TFM button actions are ready."
                       : "Credentials are configured. Live requests remain safety-locked until sandbox verification is complete."
                     : "Add TFM_USERNAME and TFM_PASSWORD to .env.local, then restart the server."}
                 </p>
@@ -1890,7 +1814,7 @@ export default function TfmStatusDashboardPage() {
             >
               {config?.configuration?.bookingReady ||
               config?.configuration?.trackingReady
-                ? "Live TFM actions are available"
+                ? "Manual TFM button actions are ready"
                 : "CSV sync remains available while live endpoints are locked"}
             </p>
 
@@ -2454,6 +2378,7 @@ export default function TfmStatusDashboardPage() {
 
             <tbody>
               {filteredOrders.map((order) => {
+                const terminal = isTerminalOrder(order);
                 const errorIssues =
                   order.issues.filter(
                     (issue) =>
@@ -2482,7 +2407,8 @@ export default function TfmStatusDashboardPage() {
                         disabled={
                           !order.valid ||
                           order.canCreateNewAwb ===
-                            false
+                            false ||
+                          terminal
                         }
                         className="h-4 w-4 rounded disabled:opacity-30"
                       />
@@ -2526,9 +2452,11 @@ export default function TfmStatusDashboardPage() {
                             </p>
                           ))}
 
-                          <p className="text-[10px] font-black uppercase text-emerald-700">
-                            New AWB allowed
-                          </p>
+                          {!terminal && (
+                            <p className="text-[10px] font-black uppercase text-emerald-700">
+                              New AWB allowed
+                            </p>
+                          )}
                         </div>
                       ) : (
                         <span className="text-xs font-bold text-slate-400">
@@ -2554,7 +2482,13 @@ export default function TfmStatusDashboardPage() {
                           "Status not imported"}
                       </p>
 
-                      {order.stale && (
+                      {order.orderStatus && (
+                        <p className="mt-1 text-[11px] font-bold text-slate-400">
+                          Order: {order.orderStatus}
+                        </p>
+                      )}
+
+                      {order.stale && !terminal && (
                         <p className="mt-2 inline-flex items-center gap-1 text-xs font-black text-amber-700">
                           <Clock3 size={13} />
                           No movement detected
@@ -2600,7 +2534,7 @@ export default function TfmStatusDashboardPage() {
                         <span
                           className={[
                             "inline-flex rounded-full border px-2.5 py-1 text-[10px] font-black",
-                            order.stale
+                            order.stale && !terminal
                               ? "border-amber-200 bg-amber-50 text-amber-700"
                               : "border-slate-200 bg-slate-50 text-slate-700",
                           ].join(" ")}
@@ -2698,6 +2632,7 @@ export default function TfmStatusDashboardPage() {
                           }
                           disabled={
                             !order.valid ||
+                            terminal ||
                             Boolean(actionBusy) ||
                             !config?.configuration?.bookingReady
                           }
@@ -2720,7 +2655,12 @@ export default function TfmStatusDashboardPage() {
                             )
                           }
                           disabled={
-                            !Boolean(order.awbNumber || order.shipmentId) ||
+                            terminal ||
+                            !Boolean(
+                              order.awbNumber ||
+                                order.shipmentId ||
+                                order.orderNo,
+                            ) ||
                             Boolean(actionBusy) ||
                             !config?.configuration?.trackingReady
                           }
@@ -2768,6 +2708,7 @@ export default function TfmStatusDashboardPage() {
                           }
                           disabled={
                             !Boolean(order.awbNumber || order.shipmentId) ||
+                            terminal ||
                             ["Delivered", "Returned", "Cancelled"].includes(
                               order.statusGroup,
                             ) ||
