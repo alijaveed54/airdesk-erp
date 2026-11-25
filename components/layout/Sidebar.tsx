@@ -214,7 +214,7 @@ export default function Sidebar() {
       icon: Truck,
     },
     {
-      show: isAdmin || Boolean(permission?.canReports),
+      show: !isSupplier && (isAdmin || Boolean(permission?.canReports)),
       href: "/reports",
       label: "Reports Home",
       icon: BarChart3,
@@ -256,13 +256,13 @@ export default function Sidebar() {
       icon: Truck,
     },
     {
-      show: isAdmin || Boolean(permission?.canReports),
+      show: !isSupplier && (isAdmin || Boolean(permission?.canReports)),
       href: "/reports/skycome",
       label: "Skycome Dispatch",
       icon: Truck,
     },
     {
-      show: isAdmin || Boolean(permission?.canReports),
+      show: !isSupplier && (isAdmin || Boolean(permission?.canReports)),
       href: "/reports/skycome-report",
       label: "Skycome Dispatch Report",
       icon: ClipboardList,
@@ -286,7 +286,7 @@ export default function Sidebar() {
       icon: ClipboardList,
     },
     {
-      show: isAdmin || Boolean(permission?.canReports),
+      show: !isSupplier && (isAdmin || Boolean(permission?.canReports)),
       href: "/reports/pending",
       label: "Pending Report",
       icon: BarChart3,
@@ -298,7 +298,7 @@ export default function Sidebar() {
       icon: ClipboardList,
     },
     {
-      show: isAdmin || Boolean(permission?.canReports),
+      show: !isSupplier && (isAdmin || Boolean(permission?.canReports)),
       href: "/reports/order-received-pending",
       label: "Order Received Pending",
       icon: ClipboardList,
