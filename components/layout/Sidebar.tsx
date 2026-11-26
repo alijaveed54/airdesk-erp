@@ -220,6 +220,12 @@ export default function Sidebar() {
       icon: BarChart3,
     },
     {
+      show: Boolean(session) && !isSupplier,
+      href: "/stock/uae",
+      label: "UAE Stock Report",
+      icon: PackageCheck,
+    },
+    {
       show: !isSupplier && (isAdmin || Boolean(permission?.canReports)),
       href: "/reports/overall-sales-purchase",
       label: "Overall Sales & Purchase",
@@ -517,7 +523,7 @@ export default function Sidebar() {
   const reportNav = sortNavItems(
     nav.filter(
       (item) =>
-        item.href.startsWith("/reports") &&
+        (item.href.startsWith("/reports") || item.href === "/stock/uae") &&
         item.href !== "/reports/skycome" &&
         item.href !== "/reports/skycome-report" &&
         !orderNav.some((entry) => entry.href === item.href) &&
@@ -526,6 +532,7 @@ export default function Sidebar() {
     ),
     [
       "/reports",
+      "/stock/uae",
       "/reports/overall-sales-purchase",
       "/reports/instock",
       "/reports/doha-receiving",

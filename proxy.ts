@@ -43,6 +43,7 @@ export function proxy(request: NextRequest) {
     pathname.startsWith("/api/public/stock/doha") ||
     pathname.startsWith("/stock/uae") ||
     pathname.startsWith("/api/public/stock/uae") ||
+    pathname.startsWith("/api/stock/uae") ||
     pathname === "/gallery" ||
     pathname.startsWith("/api/public/r2/gallery") ||
     pathname.startsWith("/api/green-api/webhook")

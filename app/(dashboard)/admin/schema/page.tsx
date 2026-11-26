@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -127,9 +127,25 @@ function formatDate(value?: string) {
 function parseJsonObject(value: string) {
   const parsed = JSON.parse(value || "{}");
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Record JSON must be an object, for example {\"Status\":\"Pending\"}.");
+    throw new Error('Record JSON must be an object, for example {"Status":"Pending"}.');
   }
   return parsed as Record<string, unknown>;
+}
+
+async function parseSafeJson<T>(response: Response, endpoint: string): Promise<T> {
+  const raw = await response.text();
+  if (!raw.trim()) {
+    return {} as T;
+  }
+
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    const snippet = raw.replace(/\s+/g, " ").trim().slice(0, 140);
+    throw new Error(
+      `${endpoint} returned non-JSON (HTTP ${response.status}). Check route or session. Response: ${snippet || "empty"}`,
+    );
+  }
 }
 
 export default function AirtableControlCenterPage() {
@@ -208,16 +224,17 @@ export default function AirtableControlCenterPage() {
     );
   }, [recordSearch, records]);
 
-  async function loadSchema(baseId = "", preferredTableId = "") {
+  const loadSchema = useCallback(async (baseId = "", preferredTableId = "") => {
     setLoading(true);
     setError("");
 
     try {
       const query = baseId ? `?baseId=${encodeURIComponent(baseId)}` : "";
-      const response = await fetch(`/api/admin/schema/manage${query}`, {
+      const endpoint = `/api/admin/schema/manage${query}`;
+      const response = await fetch(endpoint, {
         cache: "no-store",
       });
-      const data = (await response.json()) as ManageResponse;
+      const data = await parseSafeJson<ManageResponse>(response, endpoint);
 
       if (!response.ok || !data.success) {
         throw new Error(data.message || "Unable to load Airtable schema");
@@ -249,11 +266,11 @@ export default function AirtableControlCenterPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
 
   useEffect(() => {
     void loadSchema();
-  }, []);
+  }, [loadSchema]);
 
   useEffect(() => {
     setTableEditName(selectedTable?.name || "");
@@ -271,12 +288,15 @@ export default function AirtableControlCenterPage() {
         ""
       );
     });
+  }, [selectedTable, selectFields]);
+
+  useEffect(() => {
     setRecords([]);
     setRecordOffset("");
     setSelectedRecordIds([]);
     setRecordEditorId("");
     setRecordJson("{}");
-  }, [selectedTable, selectFields]);
+  }, [selectedBaseId, selectedTableId]);
 
   useEffect(() => {
     if (!editField) return;
@@ -285,12 +305,13 @@ export default function AirtableControlCenterPage() {
   }, [editField]);
 
   async function apiAction(payload: Record<string, unknown>) {
-    const response = await fetch("/api/admin/schema/manage", {
+    const endpoint = "/api/admin/schema/manage";
+    const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    const data = (await response.json()) as ManageResponse;
+    const data = await parseSafeJson<ManageResponse>(response, endpoint);
 
     if (!response.ok || (!data.success && !data.partial)) {
       throw new Error(data.message || "Airtable action failed");
@@ -312,8 +333,10 @@ export default function AirtableControlCenterPage() {
       const response = await fetch(url, { cache: "no-store" });
 
       if (!response.ok) {
-        const data = await response.json().catch(() => null);
-        throw new Error(data?.message || "Schema download failed");
+        const data = await parseSafeJson<{ message?: string }>(response, url).catch(
+          () => null,
+        );
+        throw new Error(data?.message || `Schema download failed (HTTP ${response.status})`);
       }
 
       const blob = await response.blob();
@@ -534,11 +557,9 @@ export default function AirtableControlCenterPage() {
       });
       if (offset) params.set("offset", offset);
 
-      const response = await fetch(
-        `/api/admin/schema/manage?${params.toString()}`,
-        { cache: "no-store" },
-      );
-      const data = (await response.json()) as ManageResponse;
+      const endpoint = `/api/admin/schema/manage?${params.toString()}`;
+      const response = await fetch(endpoint, { cache: "no-store" });
+      const data = await parseSafeJson<ManageResponse>(response, endpoint);
 
       if (!response.ok || !data.success) {
         throw new Error(data.message || "Airtable records could not load");
@@ -1375,7 +1396,7 @@ export default function AirtableControlCenterPage() {
                   {!filteredRecords.length && (
                     <tr>
                       <td
-                        colSpan={11}
+                        colSpan={visibleFields.length + 4}
                         className="px-4 py-12 text-center font-bold text-slate-400"
                       >
                         Records load karne ke liye “Load First 50” press karein.
