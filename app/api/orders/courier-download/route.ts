@@ -25,7 +25,13 @@ type SchemaTable = {
 
 type CourierName = "TFM" | "EWE";
 
-const schemaCache = new Map<string, SchemaTable[]>();
+type CachedSchema = {
+  expiresAt: number;
+  tables: SchemaTable[];
+};
+
+const SCHEMA_TTL_MS = 60_000;
+const schemaCache = new Map<string, CachedSchema>();
 
 function first(value: unknown): unknown {
   return Array.isArray(value) ? value[0] : value;
@@ -43,10 +49,27 @@ function text(value: unknown): string {
         objectValue.value ??
         objectValue.text ??
         ""
-    );
+    ).trim();
   }
 
   return String(resolved).trim();
+}
+
+function linkedRecordIds(value: unknown): string[] {
+  const rawList = Array.isArray(value) ? value : value ? [value] : [];
+  return Array.from(
+    new Set(
+      rawList
+        .map((entry) => {
+          if (typeof entry === "string") return entry.trim();
+          if (entry && typeof entry === "object") {
+            return String((entry as Record<string, unknown>).id ?? "").trim();
+          }
+          return "";
+        })
+        .filter((id) => id.startsWith("rec"))
+    )
+  );
 }
 
 function amount(value: unknown): number {
@@ -74,7 +97,8 @@ function findField(fields: SchemaField[], candidates: string[]) {
 function escapeFormulaValue(value: string) {
   return value
     .replace(/\\/g, "\\\\")
-    .replace(/'/g, "\\'");
+    .replace(/'/g, "\\'")
+    .replace(/\r?\n/g, " ");
 }
 
 function exactFormula(fieldName: string, value: string) {
@@ -85,7 +109,9 @@ function exactFormula(fieldName: string, value: string) {
 
 async function getSchema(baseId: string, token: string) {
   const cached = schemaCache.get(baseId);
-  if (cached) return cached;
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.tables;
+  }
 
   const response = await fetch(
     `https://api.airtable.com/v0/meta/bases/${encodeURIComponent(
@@ -110,7 +136,10 @@ async function getSchema(baseId: string, token: string) {
   }
 
   const tables = (data.tables || []) as SchemaTable[];
-  schemaCache.set(baseId, tables);
+  schemaCache.set(baseId, {
+    expiresAt: Date.now() + SCHEMA_TTL_MS,
+    tables,
+  });
 
   return tables;
 }
@@ -229,7 +258,6 @@ async function fetchAllRecords({
 async function resolveCustomers({
   airtable,
   schema,
-  invoiceTable,
   customerLinkField,
   invoiceRecords,
 }: {
@@ -237,7 +265,6 @@ async function resolveCustomers({
     ReturnType<typeof getCurrentAirtableBase>
   >;
   schema: SchemaTable[];
-  invoiceTable: SchemaTable;
   customerLinkField: SchemaField | undefined;
   invoiceRecords: any[];
 }) {
@@ -256,22 +283,9 @@ async function resolveCustomers({
 
   const ids = Array.from(
     new Set(
-      invoiceRecords
-        .flatMap((record) => {
-          const value =
-            record.fields?.[customerLinkField.name];
-
-          return Array.isArray(value)
-            ? value
-            : value
-              ? [value]
-              : [];
-        })
-        .filter(
-          (value): value is string =>
-            typeof value === "string" &&
-            value.startsWith("rec")
-        )
+      invoiceRecords.flatMap((record) =>
+        linkedRecordIds(record.fields?.[customerLinkField.name])
+      )
     )
   );
 
@@ -280,9 +294,9 @@ async function resolveCustomers({
 
     const formula =
       batch.length === 1
-        ? `RECORD_ID()='${batch[0]}'`
+        ? `RECORD_ID()='${escapeFormulaValue(batch[0])}'`
         : `OR(${batch
-            .map((id) => `RECORD_ID()='${id}'`)
+            .map((id) => `RECORD_ID()='${escapeFormulaValue(id)}'`)
             .join(",")})`;
 
     const records = await fetchAllRecords({
@@ -374,7 +388,7 @@ function makeWorkbook(
       "",
       "",
       "",
-      "Customer is allowed to open and Check Before Delivery",
+      "",
       order.note,
       "",
       "",
@@ -417,7 +431,7 @@ function makeWorkbook(
         type: "buffer",
         bookType: "xlsx",
       }),
-      extension: "xlsx",
+      extension: "xlsx" as const,
     };
   }
 
@@ -490,7 +504,7 @@ function makeWorkbook(
       type: "buffer",
       bookType: "xlsx",
     }),
-    extension: "xlsx",
+    extension: "xlsx" as const,
   };
 }
 
@@ -636,7 +650,6 @@ export async function GET(request: Request) {
     const customers = await resolveCustomers({
       airtable,
       schema,
-      invoiceTable,
       customerLinkField,
       invoiceRecords,
     });
@@ -830,12 +843,18 @@ export async function GET(request: Request) {
             unknown
           >;
 
-        const customerId = text(
+        const customerIds = linkedRecordIds(
           invoiceValues[customerLinkField?.name || ""]
         );
 
-        const customerValues =
-          customers.get(customerId) || {};
+        const customerValues: Record<string, unknown> = {};
+        for (const customerId of customerIds) {
+          const matched = customers.get(customerId);
+          if (matched) {
+            Object.assign(customerValues, matched);
+            break;
+          }
+        }
 
         const customer =
           choose(
@@ -953,9 +972,7 @@ export async function GET(request: Request) {
       status: 200,
       headers: {
         "Content-Type":
-          extension === "xls"
-            ? "application/vnd.ms-excel"
-            : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "Content-Disposition": `attachment; filename="${fileName}"`,
         "Cache-Control": "no-store",
         "X-Order-Count": String(
